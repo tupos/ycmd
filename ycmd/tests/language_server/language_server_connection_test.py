@@ -219,7 +219,7 @@ class LanguageServerConnectionTest( TestCase ):
 
 
   def test_LanguageServerConnection_FiltersInvalidProgressTransitions( self ):
-    connection = MockConnection()
+    connection = MockConnection( connection_generation = 7 )
     create_request = {
       'jsonrpc': '2.0',
       'id': 1,
@@ -245,6 +245,9 @@ class LanguageServerConnectionTest( TestCase ):
     connection._DispatchMessage( Progress( 'begin', title = 'Indexing' ) )
     begin = connection._notifications.get_nowait()
     assert_that( begin[ '_ycmd_work_done_progress' ], equal_to( True ) )
+    assert_that(
+      begin[ '_ycmd_work_done_progress_connection_generation' ],
+      equal_to( 7 ) )
 
     connection._DispatchMessage( Progress( 'begin', title = 'Again' ) )
     assert_that( calling( connection._notifications.get_nowait ),
@@ -253,6 +256,9 @@ class LanguageServerConnectionTest( TestCase ):
     connection._DispatchMessage( Progress( 'end' ) )
     end = connection._notifications.get_nowait()
     assert_that( end[ '_ycmd_work_done_progress' ], equal_to( True ) )
+    assert_that(
+      end[ '_ycmd_work_done_progress_connection_generation' ],
+      equal_to( 7 ) )
 
     connection._DispatchMessage( Progress( 'report' ) )
     assert_that( calling( connection._notifications.get_nowait ),

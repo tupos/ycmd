@@ -773,7 +773,8 @@ class LanguageServerCompleterTest( TestCase ):
   def test_LanguageServerCompleter_WorkDoneProgress( self, app ):
     completer = MockCompleter()
     request_data = RequestWrap( BuildRequest() )
-    connection = completer.GetConnection()
+    connection = MockConnection( connection_generation = 7 )
+    completer._connection = connection
     create_request = {
       'jsonrpc': '2.0',
       'id': 1,
@@ -797,6 +798,10 @@ class LanguageServerCompleterTest( TestCase ):
     connection._DispatchMessage( notification )
     notification = connection._notifications.get_nowait()
 
+    # Conversion must use the generation of the connection that received the
+    # progress, even if the completer now points at a replacement connection.
+    completer._connection = MockConnection( connection_generation = 8 )
+
     message = completer.ConvertNotificationToMessage( request_data,
                                                        notification )
     assert message is not None
@@ -805,6 +810,7 @@ class LanguageServerCompleterTest( TestCase ):
 
     assert_that( progress, has_entries( {
       'server': 'mock_completer',
+      'connection_generation': 7,
       'token': 'test-token',
       'kind': 'begin',
       'title': 'Indexing',

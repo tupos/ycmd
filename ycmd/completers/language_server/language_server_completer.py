@@ -327,12 +327,14 @@ class LanguageServerConnection( threading.Thread ):
                 project_directory,
                 watchdog_factory,
                 workspace_conf_handler,
-                notification_handler = None ):
+                notification_handler = None,
+                connection_generation: int = 0 ):
     super().__init__()
 
     self._watchdog_factory = watchdog_factory
     self._workspace_conf_handler = workspace_conf_handler
     self._project_directory = project_directory
+    self._connection_generation: int = connection_generation
     self._last_id = 0
     self._responses = {}
     self._response_mutex = threading.Lock()
@@ -688,6 +690,9 @@ class LanguageServerConnection( threading.Thread ):
         if result is lsp.WorkDoneProgressResult.ACCEPTED:
           message = message.copy()
           message[ '_ycmd_work_done_progress' ] = True
+          message[ '_ycmd_work_done_progress_connection_generation' ] = (
+            self._connection_generation
+          )
 
       self._AddNotificationToQueue( message )
 
@@ -732,11 +737,13 @@ class StandardIOLanguageServerConnection( LanguageServerConnection ):
                 server_stdin,
                 server_stdout,
                 workspace_conf_handler,
-                notification_handler = None ):
+                notification_handler = None,
+                connection_generation: int = 0 ):
     super().__init__( project_directory,
                       watchdog_factory,
                       workspace_conf_handler,
-                      notification_handler )
+                      notification_handler,
+                      connection_generation )
 
     self._server_stdin = server_stdin
     self._server_stdout = server_stdout
@@ -807,11 +814,13 @@ class TCPSingleStreamConnection( LanguageServerConnection ):
                 watchdog_factory,
                 port,
                 workspace_conf_handler,
-                notification_handler = None ):
+                notification_handler = None,
+                connection_generation: int = 0 ):
     super().__init__( project_directory,
                       watchdog_factory,
                       workspace_conf_handler,
-                      notification_handler )
+                      notification_handler,
+                      connection_generation )
 
     self.port = port
     self._client_socket = None
@@ -1023,6 +1032,10 @@ class LanguageServerCompleter( Completer ):
     #     access _latest_diagnostics, as that is the only resource shared with
     #     the poll thread.
     self._server_info_mutex = threading.Lock()
+    # This counter belongs to the completer rather than a connection, so that
+    # each replacement connection has a distinct identity. Do not reset it in
+    # ServerReset.
+    self._connection_generation: int = 0
     self.ServerReset()
 
     # LSP allows servers to return an incomplete list of completions. The cache
@@ -1116,6 +1129,8 @@ class LanguageServerCompleter( Completer ):
 
     self._project_directory = self.GetProjectDirectory( request_data )
     self._server_workspace_dirs.add( self._project_directory )
+    self._connection_generation += 1
+    connection_generation: int = self._connection_generation
 
     if self._connection_type == 'tcp':
       if self.GetCommandLine():
@@ -1138,7 +1153,8 @@ class LanguageServerCompleter( Completer ):
         lambda globs: WatchdogHandler( self, globs ),
         self._port,
         lambda request: self.WorkspaceConfigurationResponse( request ),
-        self.GetDefaultNotificationHandler() )
+        self.GetDefaultNotificationHandler(),
+        connection_generation )
     else:
       self._stderr_file = utils.CreateLogfile(
         f'{ utils.MakeSafeFileNameString( self.GetServerName() ) }_stderr' )
@@ -1158,7 +1174,8 @@ class LanguageServerCompleter( Completer ):
           self._server_handle.stdin,
           self._server_handle.stdout,
           lambda request: self.WorkspaceConfigurationResponse( request ),
-          self.GetDefaultNotificationHandler() )
+          self.GetDefaultNotificationHandler(),
+          connection_generation )
       )
 
     self._connection.Start()
@@ -2140,6 +2157,8 @@ class LanguageServerCompleter( Completer ):
       progress = value.copy()
       progress.update( {
         'server': self.GetServerName(),
+        'connection_generation': notification[
+          '_ycmd_work_done_progress_connection_generation' ],
         'token': token,
       } )
       return { 'work_done_progress': progress }
