@@ -770,6 +770,56 @@ class LanguageServerCompleterTest( TestCase ):
 
 
   @IsolatedYcmd()
+  def test_LanguageServerCompleter_WorkDoneProgress( self, app ):
+    completer = MockCompleter()
+    request_data = RequestWrap( BuildRequest() )
+    notification = {
+      'method': '$/progress',
+      'params': {
+        'token': 'test-token',
+        'value': {
+          'kind': 'begin',
+          'title': 'Indexing',
+          'percentage': 10,
+        }
+      }
+    }
+
+    assert_that(
+      completer.ConvertNotificationToMessage( request_data, notification ),
+      has_entries( {
+        'work_done_progress': has_entries( {
+          'server': 'mock_completer',
+          'token': 'test-token',
+          'kind': 'begin',
+          'title': 'Indexing',
+          'percentage': 10,
+        } )
+      } )
+    )
+
+
+  @IsolatedYcmd()
+  def test_LanguageServerCompleter_IgnoresInvalidWorkDoneProgress( self, app ):
+    completer = MockCompleter()
+    request_data = RequestWrap( BuildRequest() )
+
+    for params in (
+        None,
+        {},
+        { 'token': 'test-token' },
+        { 'token': True, 'value': { 'kind': 'begin' } },
+        { 'token': 'test-token', 'value': None },
+        { 'token': 'test-token', 'value': { 'kind': 'unknown' } } ):
+      assert_that(
+        completer.ConvertNotificationToMessage(
+          request_data,
+          { 'method': '$/progress', 'params': params } ),
+        equal_to( None )
+      )
+
+
+  @IsolatedYcmd()
   def test_LanguageServerCompleter_GetCompletions_List( self, app ):
     completer = MockCompleter()
     request_data = RequestWrap( BuildRequest() )

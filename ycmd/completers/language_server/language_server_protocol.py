@@ -303,6 +303,9 @@ def Initialize( request_id,
   """Build the Language Server initialize request"""
 
   capabilities = {
+    'window': {
+      'workDoneProgress': True,
+    },
     'workspace': {
       'applyEdit': True,
       'didChangeWatchedFiles': {

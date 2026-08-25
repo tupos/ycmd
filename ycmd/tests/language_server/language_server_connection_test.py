@@ -20,6 +20,7 @@ from ycmd.completers.language_server import language_server_completer as lsc
 from hamcrest import assert_that, calling, equal_to, raises
 from unittest import TestCase
 from ycmd.tests.language_server import MockConnection
+from ycmd.completers.language_server import language_server_protocol as lsp
 
 import queue
 
@@ -176,3 +177,18 @@ class LanguageServerConnectionTest( TestCase ):
       with patch.object( connection, 'WriteData' ) as write_data:
         connection.run()
         write_data.assert_called_with( expected_response )
+
+
+  def test_LanguageServerConnection_AcceptWorkDoneProgressCreate( self ):
+    connection = MockConnection()
+    request = {
+      'jsonrpc': '2.0',
+      'id': 1,
+      'method': 'window/workDoneProgress/create',
+      'params': { 'token': 'test-token' },
+    }
+
+    with patch.object( connection, 'SendResponse' ) as send_response:
+      connection._ServerToClientRequest( request )
+
+    send_response.assert_called_once_with( lsp.Void( request ) )

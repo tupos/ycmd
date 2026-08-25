@@ -16,12 +16,28 @@
 # along with ycmd.  If not, see <http://www.gnu.org/licenses/>.
 
 from ycmd.completers.language_server import language_server_protocol as lsp
-from hamcrest import assert_that, equal_to, calling, is_not, raises
+from hamcrest import assert_that, equal_to, calling, has_entries, is_not, raises
 from unittest import TestCase
 from ycmd.tests.test_utils import UnixOnly, WindowsOnly
 
 
 class LanguageServerProtocolTest( TestCase ):
+  def test_Initialize_AdvertisesWorkDoneProgress( self ):
+    message = lsp.Initialize( 1, '/project', {}, {}, [] )
+    payload = message.split( b'\r\n\r\n', 1 )[ 1 ]
+
+    assert_that(
+      lsp.Parse( payload ),
+      has_entries( {
+        'params': has_entries( {
+          'capabilities': has_entries( {
+            'window': { 'workDoneProgress': True }
+          } )
+        } )
+      } )
+    )
+
+
   def test_ServerFileStateStore_RetrieveDelete( self ):
     store = lsp.ServerFileStateStore()
 

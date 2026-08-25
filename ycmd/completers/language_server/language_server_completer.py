@@ -633,6 +633,8 @@ class LanguageServerConnection( threading.Thread ):
         self.SendResponse(
           lsp.Accept( request,
                       lsp.WorkspaceFolders( *self._server_workspace_dirs ) ) )
+      elif method == 'window/workDoneProgress/create':
+        self.SendResponse( lsp.Void( request ) )
       else: # method unknown - reject
         self.SendResponse( lsp.Reject( request, lsp.Errors.MethodNotFound ) )
       return
@@ -2107,6 +2109,26 @@ class LanguageServerCompleter( Completer ):
     if notification[ 'method' ] == 'window/showMessage':
       return responses.BuildDisplayMessageResponse(
         notification[ 'params' ][ 'message' ] )
+
+    if notification[ 'method' ] == '$/progress':
+      params = notification.get( 'params' )
+      if not isinstance( params, dict ):
+        return None
+
+      token = params.get( 'token' )
+      value = params.get( 'value' )
+      if ( not isinstance( token, ( str, int ) ) or
+           isinstance( token, bool ) or
+           not isinstance( value, dict ) or
+           value.get( 'kind' ) not in ( 'begin', 'report', 'end' ) ):
+        return None
+
+      progress = value.copy()
+      progress.update( {
+        'server': self.GetServerName(),
+        'token': token,
+      } )
+      return { 'work_done_progress': progress }
 
     if notification[ 'method' ] == 'textDocument/publishDiagnostics':
       params = notification[ 'params' ]
