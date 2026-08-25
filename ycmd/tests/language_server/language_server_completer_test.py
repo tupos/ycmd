@@ -773,6 +773,13 @@ class LanguageServerCompleterTest( TestCase ):
   def test_LanguageServerCompleter_WorkDoneProgress( self, app ):
     completer = MockCompleter()
     request_data = RequestWrap( BuildRequest() )
+    connection = completer.GetConnection()
+    create_request = {
+      'jsonrpc': '2.0',
+      'id': 1,
+      'method': 'window/workDoneProgress/create',
+      'params': { 'token': 'test-token' },
+    }
     notification = {
       'method': '$/progress',
       'params': {
@@ -785,18 +792,24 @@ class LanguageServerCompleterTest( TestCase ):
       }
     }
 
-    assert_that(
-      completer.ConvertNotificationToMessage( request_data, notification ),
-      has_entries( {
-        'work_done_progress': has_entries( {
-          'server': 'mock_completer',
-          'token': 'test-token',
-          'kind': 'begin',
-          'title': 'Indexing',
-          'percentage': 10,
-        } )
-      } )
-    )
+    with patch.object( connection, 'SendResponse' ):
+      connection._ServerToClientRequest( create_request )
+    connection._DispatchMessage( notification )
+    notification = connection._notifications.get_nowait()
+
+    message = completer.ConvertNotificationToMessage( request_data,
+                                                       notification )
+    assert message is not None
+    progress = message.get( 'work_done_progress' )
+    assert isinstance( progress, dict )
+
+    assert_that( progress, has_entries( {
+      'server': 'mock_completer',
+      'token': 'test-token',
+      'kind': 'begin',
+      'title': 'Indexing',
+      'percentage': 10,
+    } ) )
 
 
   @IsolatedYcmd()

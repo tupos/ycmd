@@ -15,7 +15,7 @@
 # You should have received a copy of the GNU General Public License
 # along with ycmd.  If not, see <http://www.gnu.org/licenses/>.
 
-from unittest.mock import patch, MagicMock
+from unittest.mock import call, patch, MagicMock
 from ycmd.completers.language_server import language_server_completer as lsc
 from hamcrest import assert_that, calling, equal_to, raises
 from unittest import TestCase
@@ -192,3 +192,85 @@ class LanguageServerConnectionTest( TestCase ):
       connection._ServerToClientRequest( request )
 
     send_response.assert_called_once_with( lsp.Void( request ) )
+
+
+  def test_LanguageServerConnection_RejectInvalidOrDuplicateProgressToken(
+      self ):
+    connection = MockConnection()
+    valid_request = {
+      'jsonrpc': '2.0',
+      'id': 1,
+      'method': 'window/workDoneProgress/create',
+      'params': { 'token': 'test-token' },
+    }
+    duplicate_request = dict( valid_request, id = 2 )
+    invalid_request = dict( valid_request, id = 3, params = {} )
+
+    with patch.object( connection, 'SendResponse' ) as send_response:
+      connection._ServerToClientRequest( valid_request )
+      connection._ServerToClientRequest( duplicate_request )
+      connection._ServerToClientRequest( invalid_request )
+
+    assert_that( send_response.call_args_list, equal_to( [
+      call( lsp.Void( valid_request ) ),
+      call( lsp.Reject( duplicate_request, lsp.Errors.InvalidParams ) ),
+      call( lsp.Reject( invalid_request, lsp.Errors.InvalidParams ) ),
+    ] ) )
+
+
+  def test_LanguageServerConnection_FiltersInvalidProgressTransitions( self ):
+    connection = MockConnection()
+    create_request = {
+      'jsonrpc': '2.0',
+      'id': 1,
+      'method': 'window/workDoneProgress/create',
+      'params': { 'token': 'test-token' },
+    }
+    with patch.object( connection, 'SendResponse' ):
+      connection._ServerToClientRequest( create_request )
+
+    def Progress( kind: str, **kwargs: object ) -> dict[ str, object ]:
+      value: dict[ str, object ] = { 'kind': kind }
+      value.update( kwargs )
+      return {
+        'jsonrpc': '2.0',
+        'method': '$/progress',
+        'params': { 'token': 'test-token', 'value': value },
+      }
+
+    connection._DispatchMessage( Progress( 'report' ) )
+    assert_that( calling( connection._notifications.get_nowait ),
+                 raises( queue.Empty ) )
+
+    connection._DispatchMessage( Progress( 'begin', title = 'Indexing' ) )
+    begin = connection._notifications.get_nowait()
+    assert_that( begin[ '_ycmd_work_done_progress' ], equal_to( True ) )
+
+    connection._DispatchMessage( Progress( 'begin', title = 'Again' ) )
+    assert_that( calling( connection._notifications.get_nowait ),
+                 raises( queue.Empty ) )
+
+    connection._DispatchMessage( Progress( 'end' ) )
+    end = connection._notifications.get_nowait()
+    assert_that( end[ '_ycmd_work_done_progress' ], equal_to( True ) )
+
+    connection._DispatchMessage( Progress( 'report' ) )
+    assert_that( calling( connection._notifications.get_nowait ),
+                 raises( queue.Empty ) )
+
+
+  def test_LanguageServerConnection_DoesNotMarkUntrackedProgress( self ):
+    connection = MockConnection()
+    notification = {
+      'jsonrpc': '2.0',
+      'method': '$/progress',
+      'params': {
+        'token': 'partial-results',
+        'value': [ 'result' ],
+      },
+    }
+
+    connection._DispatchMessage( notification )
+
+    assert_that( connection._notifications.get_nowait(),
+                 equal_to( notification ) )

@@ -17,9 +17,12 @@
 
 import sys
 import collections
+import enum
 import os
 import json
 import hashlib
+import threading
+from typing import TypeGuard
 from urllib.parse import urljoin, urlparse, unquote
 from urllib.request import pathname2url, url2pathname
 
@@ -869,3 +872,140 @@ def RangesOverlapLines( a, b ):
     return False
 
   return True
+
+
+type ProgressToken = str | int
+
+
+class WorkDoneProgressResult( enum.Enum ):
+  UNTRACKED = enum.auto()  # Token may belong to another progress mechanism.
+  ACCEPTED = enum.auto()   # Valid work-done payload and lifecycle transition.
+  INVALID = enum.auto()    # Tracked token with invalid payload or transition.
+
+
+class _WorkDoneProgressState( enum.Enum ):
+  CREATED = enum.auto()   # Create accepted; waiting for begin.
+  ACTIVE = enum.auto()    # Begin received; report or end may follow.
+  FINISHED = enum.auto()  # End received; token remains reserved against reuse.
+
+
+class WorkDoneProgressTracker:
+  """Tracks server-created work-done progress for one LSP connection."""
+
+  def __init__( self ) -> None:
+    self._tokens: dict[ ProgressToken, _WorkDoneProgressState ] = {}
+    self._mutex: threading.Lock = threading.Lock()
+
+
+  def Create( self, token: object ) -> bool:
+    """Register a token from window/workDoneProgress/create."""
+    if not self._IsToken( token ):
+      return False
+
+    with self._mutex:
+      if token in self._tokens:
+        return False
+      self._tokens[ token ] = _WorkDoneProgressState.CREATED
+    return True
+
+
+  def Process( self,
+               token: object,
+               value: object ) -> WorkDoneProgressResult:
+    """Validate and advance a work-done progress notification.
+
+    An untracked token may belong to another use of the generic $/progress
+    notification, such as partial-result progress.
+    """
+    if not self._IsToken( token ):
+      return WorkDoneProgressResult.UNTRACKED
+
+    with self._mutex:
+      state = self._tokens.get( token )
+      if state is None:
+        return WorkDoneProgressResult.UNTRACKED
+
+      if not isinstance( value, dict ):
+        return WorkDoneProgressResult.INVALID
+
+      match value.get( 'kind' ):
+        case 'begin':
+          if ( state is not _WorkDoneProgressState.CREATED or
+               not self._ValidateBegin( value ) ):
+            return WorkDoneProgressResult.INVALID
+          self._tokens[ token ] = _WorkDoneProgressState.ACTIVE
+        case 'report':
+          if ( state is not _WorkDoneProgressState.ACTIVE or
+               not self._ValidateReport( value ) ):
+            return WorkDoneProgressResult.INVALID
+        case 'end':
+          if ( state is not _WorkDoneProgressState.ACTIVE or
+               not self._ValidateEnd( value ) ):
+            return WorkDoneProgressResult.INVALID
+          self._tokens[ token ] = _WorkDoneProgressState.FINISHED
+        case _:
+          return WorkDoneProgressResult.INVALID
+
+    return WorkDoneProgressResult.ACCEPTED
+
+
+  @staticmethod
+  def _IsToken( token: object ) -> TypeGuard[ ProgressToken ]:
+    return ( isinstance( token, ( str, int ) ) and
+             not isinstance( token, bool ) )
+
+
+  @staticmethod
+  def _ValidateBegin( value: object ) -> bool:
+    if not isinstance( value, dict ):
+      return False
+    if value.get( 'kind' ) != 'begin':
+      return False
+    if not isinstance( value.get( 'title' ), str ):
+      return False
+    if ( 'cancellable' in value and
+         not isinstance( value[ 'cancellable' ], bool ) ):
+      return False
+    if ( 'message' in value and
+         not isinstance( value[ 'message' ], str ) ):
+      return False
+    if 'percentage' in value:
+      percentage = value[ 'percentage' ]
+      if ( not isinstance( percentage, int ) or
+           isinstance( percentage, bool ) or
+           percentage < 0 or percentage > 100 ):
+        return False
+    return True
+
+
+  @staticmethod
+  def _ValidateReport( value: object ) -> bool:
+    if not isinstance( value, dict ):
+      return False
+    if value.get( 'kind' ) != 'report':
+      return False
+    if ( 'cancellable' in value and
+         not isinstance( value[ 'cancellable' ], bool ) ):
+      return False
+    if ( 'message' in value and
+         not isinstance( value[ 'message' ], str ) ):
+      return False
+    if 'percentage' in value:
+      percentage = value[ 'percentage' ]
+      if ( not isinstance( percentage, int ) or
+           isinstance( percentage, bool ) or
+           percentage < 0 or percentage > 100 ):
+        return False
+    return True
+
+
+  @staticmethod
+  def _ValidateEnd( value: object ) -> bool:
+    if not isinstance( value, dict ):
+      return False
+    if value.get( 'kind' ) != 'end':
+      return False
+    if ( 'message' in value and
+         not isinstance( value[ 'message' ], str ) ):
+      return False
+    return True

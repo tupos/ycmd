@@ -336,6 +336,9 @@ class LanguageServerConnection( threading.Thread ):
     self._last_id = 0
     self._responses = {}
     self._response_mutex = threading.Lock()
+    self._work_done_progress: lsp.WorkDoneProgressTracker = (
+      lsp.WorkDoneProgressTracker()
+    )
     self._notifications = queue.Queue( maxsize=MAX_QUEUED_MESSAGES )
 
     self._connection_event = threading.Event()
@@ -634,7 +637,13 @@ class LanguageServerConnection( threading.Thread ):
           lsp.Accept( request,
                       lsp.WorkspaceFolders( *self._server_workspace_dirs ) ) )
       elif method == 'window/workDoneProgress/create':
-        self.SendResponse( lsp.Void( request ) )
+        params = request.get( 'params' )
+        token = params.get( 'token' ) if isinstance( params, dict ) else None
+        if self._work_done_progress.Create( token ):
+          self.SendResponse( lsp.Void( request ) )
+        else:
+          self.SendResponse( lsp.Reject( request,
+                                         lsp.Errors.InvalidParams ) )
       else: # method unknown - reject
         self.SendResponse( lsp.Reject( request, lsp.Errors.MethodNotFound ) )
       return
@@ -667,6 +676,19 @@ class LanguageServerConnection( threading.Thread ):
           del self._responses[ message_id ]
     else:
       # This is a notification
+      if message.get( 'method' ) == '$/progress':
+        params = message.get( 'params' )
+        token = params.get( 'token' ) if isinstance( params, dict ) else None
+        value = params.get( 'value' ) if isinstance( params, dict ) else None
+        result = self._work_done_progress.Process( token, value )
+        if result is lsp.WorkDoneProgressResult.INVALID:
+          LOGGER.debug( 'Ignoring invalid work done progress notification: %s',
+                        message )
+          return
+        if result is lsp.WorkDoneProgressResult.ACCEPTED:
+          message = message.copy()
+          message[ '_ycmd_work_done_progress' ] = True
+
       self._AddNotificationToQueue( message )
 
       # If there is an immediate (in-message-pump-thread) handler configured,
@@ -2110,19 +2132,11 @@ class LanguageServerCompleter( Completer ):
       return responses.BuildDisplayMessageResponse(
         notification[ 'params' ][ 'message' ] )
 
-    if notification[ 'method' ] == '$/progress':
+    if ( notification[ 'method' ] == '$/progress' and
+         notification.get( '_ycmd_work_done_progress' ) ):
       params = notification.get( 'params' )
-      if not isinstance( params, dict ):
-        return None
-
       token = params.get( 'token' )
       value = params.get( 'value' )
-      if ( not isinstance( token, ( str, int ) ) or
-           isinstance( token, bool ) or
-           not isinstance( value, dict ) or
-           value.get( 'kind' ) not in ( 'begin', 'report', 'end' ) ):
-        return None
-
       progress = value.copy()
       progress.update( {
         'server': self.GetServerName(),

@@ -22,6 +22,101 @@ from ycmd.tests.test_utils import UnixOnly, WindowsOnly
 
 
 class LanguageServerProtocolTest( TestCase ):
+  def test_WorkDoneProgressTracker_Lifecycle( self ):
+    tracker = lsp.WorkDoneProgressTracker()
+
+    assert_that( tracker.Create( 'index' ), equal_to( True ) )
+    assert_that(
+      tracker.Process( 'index', { 'kind': 'report' } ),
+      equal_to( lsp.WorkDoneProgressResult.INVALID ) )
+    assert_that(
+      tracker.Process( 'index', {
+        'kind': 'begin',
+        'title': 'Indexing',
+        'percentage': 0,
+      } ),
+      equal_to( lsp.WorkDoneProgressResult.ACCEPTED ) )
+    assert_that(
+      tracker.Process( 'index', {
+        'kind': 'report',
+        'message': 'Checking files',
+        'percentage': 50,
+      } ),
+      equal_to( lsp.WorkDoneProgressResult.ACCEPTED ) )
+    assert_that(
+      tracker.Process( 'index', { 'kind': 'end', 'message': 'Done' } ),
+      equal_to( lsp.WorkDoneProgressResult.ACCEPTED ) )
+    assert_that(
+      tracker.Process( 'index', { 'kind': 'report' } ),
+      equal_to( lsp.WorkDoneProgressResult.INVALID ) )
+
+
+  def test_WorkDoneProgressTracker_RejectsInvalidOrDuplicateToken( self ):
+    tracker = lsp.WorkDoneProgressTracker()
+
+    for token in ( None, True, 1.5, [], {} ):
+      assert_that( tracker.Create( token ), equal_to( False ) )
+
+    assert_that( tracker.Create( 'index' ), equal_to( True ) )
+    assert_that( tracker.Create( 'index' ), equal_to( False ) )
+
+
+  def test_WorkDoneProgressTracker_ReturnsUntrackedForUnknownToken( self ):
+    tracker = lsp.WorkDoneProgressTracker()
+
+    assert_that(
+      tracker.Process( 'partial-results', [ 'result' ] ),
+      equal_to( lsp.WorkDoneProgressResult.UNTRACKED ) )
+
+
+  def test_WorkDoneProgressTracker_ValidatesBeginPayload( self ):
+    tracker = lsp.WorkDoneProgressTracker()
+    tracker.Create( 'index' )
+
+    for value in (
+        None,
+        {},
+        { 'kind': 'unknown' },
+        { 'kind': 'begin' },
+        { 'kind': 'begin', 'title': 1 },
+        { 'kind': 'begin', 'title': 'Indexing', 'cancellable': 1 },
+        { 'kind': 'begin', 'title': 'Indexing', 'message': False },
+        { 'kind': 'begin', 'title': 'Indexing', 'percentage': True },
+        { 'kind': 'begin', 'title': 'Indexing', 'percentage': 1.5 },
+        { 'kind': 'begin', 'title': 'Indexing', 'percentage': -1 },
+        { 'kind': 'begin', 'title': 'Indexing', 'percentage': 101 } ):
+      assert_that(
+        tracker.Process( 'index', value ),
+        equal_to( lsp.WorkDoneProgressResult.INVALID ) )
+
+
+  def test_WorkDoneProgressTracker_ValidatesReportPayload( self ):
+    tracker = lsp.WorkDoneProgressTracker()
+    tracker.Create( 'index' )
+    tracker.Process( 'index', { 'kind': 'begin', 'title': 'Indexing' } )
+
+    for value in (
+        { 'kind': 'report', 'cancellable': 1 },
+        { 'kind': 'report', 'message': False },
+        { 'kind': 'report', 'percentage': True },
+        { 'kind': 'report', 'percentage': 1.5 },
+        { 'kind': 'report', 'percentage': -1 },
+        { 'kind': 'report', 'percentage': 101 } ):
+      assert_that(
+        tracker.Process( 'index', value ),
+        equal_to( lsp.WorkDoneProgressResult.INVALID ) )
+
+
+  def test_WorkDoneProgressTracker_ValidatesEndPayload( self ):
+    tracker = lsp.WorkDoneProgressTracker()
+    tracker.Create( 'index' )
+    tracker.Process( 'index', { 'kind': 'begin', 'title': 'Indexing' } )
+
+    assert_that(
+      tracker.Process( 'index', { 'kind': 'end', 'message': False } ),
+      equal_to( lsp.WorkDoneProgressResult.INVALID ) )
+
+
   def test_Initialize_AdvertisesWorkDoneProgress( self ):
     message = lsp.Initialize( 1, '/project', {}, {}, [] )
     payload = message.split( b'\r\n\r\n', 1 )[ 1 ]
