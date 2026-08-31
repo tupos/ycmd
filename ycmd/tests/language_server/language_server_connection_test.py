@@ -97,6 +97,23 @@ class LanguageServerConnectionTest( TestCase ):
       connection.run()
 
 
+  def test_LanguageServerConnection_CleansUpProgressWhenConnectionEnds( self ):
+    for exception in ( lsc.LanguageServerConnectionStopped, IOError ):
+      with self.subTest( exception = exception ):
+        connection = MockConnection( connection_generation = 7 )
+
+        with patch.object( connection, 'ReadData', side_effect = exception ):
+          connection.run()
+
+        assert_that( connection._notifications.get_nowait(), equal_to( {
+          'method': '$/progress',
+          lsc.WORK_DONE_PROGRESS_CLEANUP: True,
+          lsc.WORK_DONE_PROGRESS_CONNECTION_GENERATION: 7,
+        } ) )
+        assert_that( calling( connection._notifications.get_nowait ),
+                     raises( queue.Empty ) )
+
+
   @patch( 'ycmd.completers.language_server.language_server_completer.'
           'CONNECTION_TIMEOUT',
           0.5 )

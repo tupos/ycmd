@@ -49,6 +49,17 @@ CONNECTION_TIMEOUT         = 5
 # Size of the notification ring buffer
 MAX_QUEUED_MESSAGES = 250
 
+# Private keys used only while notifications are in ycmd's connection queue.
+# The progress flag identifies validated server progress; the cleanup flag
+# identifies a synthetic request to discard progress for a dead or replaced
+# connection. Both message kinds carry the generation key so cleanup for an
+# old connection cannot affect its replacement.
+WORK_DONE_PROGRESS: str = '_ycmd_work_done_progress'
+WORK_DONE_PROGRESS_CLEANUP: str = '_ycmd_work_done_progress_cleanup'
+WORK_DONE_PROGRESS_CONNECTION_GENERATION: str = (
+  '_ycmd_work_done_progress_connection_generation'
+)
+
 PROVIDERS_MAP = {
   'codeActionProvider': (
     lambda self, request_data, args: self.GetCodeActions( request_data )
@@ -392,6 +403,16 @@ class LanguageServerConnection( threading.Thread ):
 
       # Close any remaining sockets or files
       self.Shutdown()
+    finally:
+      # A server cannot finish its active work-done progress after its
+      # connection has closed. Tell the client to discard all progress that
+      # belongs to this connection generation.
+      self._AddNotificationToQueue( {
+        'method': '$/progress',
+        WORK_DONE_PROGRESS_CLEANUP: True,
+        WORK_DONE_PROGRESS_CONNECTION_GENERATION:
+          self._connection_generation,
+      } )
 
 
   def Start( self ):
@@ -689,8 +710,8 @@ class LanguageServerConnection( threading.Thread ):
           return
         if result is lsp.WorkDoneProgressResult.ACCEPTED:
           message = message.copy()
-          message[ '_ycmd_work_done_progress' ] = True
-          message[ '_ycmd_work_done_progress_connection_generation' ] = (
+          message[ WORK_DONE_PROGRESS ] = True
+          message[ WORK_DONE_PROGRESS_CONNECTION_GENERATION ] = (
             self._connection_generation
           )
 
@@ -1129,8 +1150,10 @@ class LanguageServerCompleter( Completer ):
 
     self._project_directory = self.GetProjectDirectory( request_data )
     self._server_workspace_dirs.add( self._project_directory )
+    previous_connection_generation: int = self._connection_generation
     self._connection_generation += 1
     connection_generation: int = self._connection_generation
+    connection: LanguageServerConnection
 
     if self._connection_type == 'tcp':
       if self.GetCommandLine():
@@ -1148,7 +1171,7 @@ class LanguageServerCompleter( Completer ):
               stderr = stderr,
               env = self.GetServerEnvironment() )
 
-      self._connection = TCPSingleStreamConnection(
+      connection = TCPSingleStreamConnection(
         self._project_directory,
         lambda globs: WatchdogHandler( self, globs ),
         self._port,
@@ -1167,7 +1190,7 @@ class LanguageServerCompleter( Completer ):
           stderr = stderr,
           env = self.GetServerEnvironment() )
 
-      self._connection = (
+      connection = (
         StandardIOLanguageServerConnection(
           self._project_directory,
           lambda globs: WatchdogHandler( self, globs ),
@@ -1178,6 +1201,7 @@ class LanguageServerCompleter( Completer ):
           connection_generation )
       )
 
+    self._SetConnection( connection, previous_connection_generation )
     self._connection.Start()
 
     self._connection.AwaitServerConnection()
@@ -1188,6 +1212,26 @@ class LanguageServerCompleter( Completer ):
                    self._server_handle.pid )
 
     return True
+
+
+  def _SetConnection(
+      self,
+      connection: LanguageServerConnection,
+      previous_connection_generation: int ) -> None:
+    # A poll may still be waiting on the previous connection's queue when it
+    # terminates. Its cleanup marker wakes that poll. Also place the marker in
+    # the replacement queue before publishing the new connection so that the
+    # next poll cannot miss the cleanup during the handover. Duplicate cleanup
+    # is harmless because clients treat generations monotonically.
+    if previous_connection_generation > 0:
+      connection._AddNotificationToQueue( {
+        'method': '$/progress',
+        WORK_DONE_PROGRESS_CLEANUP: True,
+        WORK_DONE_PROGRESS_CONNECTION_GENERATION:
+          previous_connection_generation,
+      } )
+
+    self._connection = connection
 
 
   def Shutdown( self ):
@@ -1296,6 +1340,19 @@ class LanguageServerCompleter( Completer ):
     self._OnInitializeComplete(
       lambda self: self._UpdateServerWithFileContents( request_data )
     )
+
+
+  def _StopServer( self ) -> dict[ str, object ] | None:
+    connection_generation: int = self._connection_generation
+    self.Shutdown()
+    if connection_generation <= 0:
+      return None
+    return {
+      'work_done_progress_cleanup': {
+        'server': self.GetServerName(),
+        'connection_generation': connection_generation,
+      }
+    }
 
 
   def _ServerIsInitialized( self ):
@@ -1822,7 +1879,7 @@ class LanguageServerCompleter( Completer ):
     commands.update( DEFAULT_SUBCOMMANDS_MAP )
     commands.update( {
       'StopServer': (
-        lambda self, request_data, args: self.Shutdown()
+        lambda self, request_data, args: self._StopServer()
       ),
       'RestartServer': (
         lambda self, request_data, args: self._RestartServer( request_data )
@@ -2145,12 +2202,21 @@ class LanguageServerCompleter( Completer ):
     Implementations may override this method to handle custom notifications, but
     must always call the base implementation for unrecognized notifications."""
 
+    if notification.get( WORK_DONE_PROGRESS_CLEANUP ):
+      return {
+        'work_done_progress_cleanup': {
+          'server': self.GetServerName(),
+          'connection_generation': notification[
+            WORK_DONE_PROGRESS_CONNECTION_GENERATION ],
+        }
+      }
+
     if notification[ 'method' ] == 'window/showMessage':
       return responses.BuildDisplayMessageResponse(
         notification[ 'params' ][ 'message' ] )
 
     if ( notification[ 'method' ] == '$/progress' and
-         notification.get( '_ycmd_work_done_progress' ) ):
+         notification.get( WORK_DONE_PROGRESS ) ):
       params = notification.get( 'params' )
       token = params.get( 'token' )
       value = params.get( 'value' )
@@ -2158,7 +2224,7 @@ class LanguageServerCompleter( Completer ):
       progress.update( {
         'server': self.GetServerName(),
         'connection_generation': notification[
-          '_ycmd_work_done_progress_connection_generation' ],
+          WORK_DONE_PROGRESS_CONNECTION_GENERATION ],
         'token': token,
       } )
       return { 'work_done_progress': progress }

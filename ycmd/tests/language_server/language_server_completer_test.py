@@ -819,6 +819,58 @@ class LanguageServerCompleterTest( TestCase ):
 
 
   @IsolatedYcmd()
+  def test_LanguageServerCompleter_WorkDoneProgressCleanup( self, app ):
+    completer = MockCompleter()
+    request_data = RequestWrap( BuildRequest() )
+    completer._connection = MockConnection( connection_generation = 8 )
+
+    message = completer.ConvertNotificationToMessage( request_data, {
+      lsc.WORK_DONE_PROGRESS_CLEANUP: True,
+      lsc.WORK_DONE_PROGRESS_CONNECTION_GENERATION: 7,
+    } )
+
+    assert_that( message, equal_to( {
+      'work_done_progress_cleanup': {
+        'server': 'mock_completer',
+        'connection_generation': 7,
+      }
+    } ) )
+
+
+  @IsolatedYcmd()
+  def test_LanguageServerCompleter_PutsCleanupInReplacementQueue( self, app ):
+    completer = MockCompleter()
+    replacement = MockConnection( connection_generation = 8 )
+
+    completer._SetConnection( replacement, 7 )
+
+    assert_that( completer.GetConnection(), equal_to( replacement ) )
+    assert_that( replacement._notifications.get_nowait(), equal_to( {
+      'method': '$/progress',
+      lsc.WORK_DONE_PROGRESS_CLEANUP: True,
+      lsc.WORK_DONE_PROGRESS_CONNECTION_GENERATION: 7,
+    } ) )
+
+
+  @IsolatedYcmd()
+  def test_LanguageServerCompleter_StopServerReturnsProgressCleanup(
+      self, app ):
+    completer = MockCompleter()
+    completer._connection_generation = 7
+
+    with patch.object( completer, 'Shutdown' ) as shutdown:
+      response = completer._StopServer()
+
+    shutdown.assert_called_once_with()
+    assert_that( response, equal_to( {
+      'work_done_progress_cleanup': {
+        'server': 'mock_completer',
+        'connection_generation': 7,
+      }
+    } ) )
+
+
+  @IsolatedYcmd()
   def test_LanguageServerCompleter_IgnoresInvalidWorkDoneProgress( self, app ):
     completer = MockCompleter()
     request_data = RequestWrap( BuildRequest() )
