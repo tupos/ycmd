@@ -15,6 +15,7 @@
 # You should have received a copy of the GNU General Public License
 # along with ycmd.  If not, see <http://www.gnu.org/licenses/>.
 
+from collections.abc import Callable
 from unittest.mock import patch
 from unittest import TestCase
 from hamcrest import ( all_of,
@@ -88,6 +89,46 @@ class MockCompleter( lsc.LanguageServerCompleter, DummyCompleter ):
 
   def GetServerName( self ):
     return 'mock_completer'
+
+
+def _CheckContentModifiedRetry(
+    completer: MockCompleter,
+    compute_request: Callable[ [ RequestWrap ], object ],
+    successful_response: dict[ str, object ],
+    expected_result: object
+) -> None:
+  completer._started = True
+  completer._initialize_event.set()
+  request_data = RequestWrap( BuildRequest( contents = '' ) )
+  content_modified = lsc.ResponseFailedException( {
+    'code': lsp.Errors.ContentModified.code,
+    'message': lsp.Errors.ContentModified.reason
+  } )
+
+  with patch.object(
+      completer,
+      '_UpdateServerWithCurrentFileContents'
+  ):
+    with patch.object(
+        completer.GetConnection(),
+        'GetResponse',
+        side_effect = [
+          content_modified,
+          successful_response
+        ]
+    ) as get_response:
+      assert_that( compute_request( request_data ),
+                   equal_to( expected_result ) )
+
+  assert_that(
+    [ request.args[ 0 ] for request in get_response.call_args_list ],
+    contains_exactly( 1, 2 ) )
+  assert_that(
+    [ lsp.Parse(
+        request.args[ 1 ].split( b'\r\n\r\n', 1 )[ 1 ]
+      )[ 'id' ]
+      for request in get_response.call_args_list ],
+    contains_exactly( 1, 2 ) )
 
 
 def _TupleToLSPRange( tuple ):
@@ -1675,6 +1716,100 @@ class LanguageServerCompleterTest( TestCase ):
                       uri_to_filepath:
         assert_that( completer.OnFileReadyToParse( request_data ), diagnostics )
         uri_to_filepath.assert_called()
+
+
+  @IsolatedYcmd()
+  def test_LanguageServerCompleter_ComputeSemanticTokens_RetriesContentModified(
+      self, _app: object ) -> None:
+    completer = MockCompleter()
+    completer._server_capabilities = {
+      'semanticTokensProvider': {
+        'range': True
+      }
+    }
+    completer._semantic_token_atlas = lsc.TokenAtlas( {
+      'tokenTypes': [],
+      'tokenModifiers': []
+    } )
+    _CheckContentModifiedRetry(
+        completer,
+        completer.ComputeSemanticTokens,
+        { 'result': { 'data': [] } },
+        { 'tokens': [] } )
+
+
+  @IsolatedYcmd()
+  def test_LanguageServerCompleter_ComputeInlayHints_RetriesContentModified(
+      self, _app: object ) -> None:
+    completer = MockCompleter()
+    completer._server_capabilities = {
+      'inlayHintProvider': True
+    }
+    _CheckContentModifiedRetry(
+        completer,
+        completer.ComputeInlayHints,
+        { 'result': [] },
+        [] )
+
+
+  def test_GetResponseWithRetries_DoesNotRetryUnexpectedFailure(
+      self
+  ) -> None:
+    connection = MockConnection()
+    unexpected_failure = lsc.ResponseFailedException( {
+      'code': lsp.Errors.InternalError.code,
+      'message': lsp.Errors.InternalError.reason
+    } )
+
+    def BuildLspRequest( request_id: int ) -> bytes:
+      return str( request_id ).encode( 'utf-8' )
+
+    with patch.object(
+        connection,
+        'GetResponse',
+        side_effect = unexpected_failure
+    ) as get_response:
+      assert_that(
+        calling( lsc._GetResponseWithRetries ).with_args(
+          connection,
+          BuildLspRequest,
+          { lsp.Errors.ContentModified.code },
+          1
+        ),
+        raises( lsc.ResponseFailedException )
+      )
+
+    assert_that( get_response.call_count, equal_to( 1 ) )
+
+
+  def test_GetResponseWithRetries_StopsAfterMaximumAttempts(
+      self
+  ) -> None:
+    connection = MockConnection()
+    content_modified = lsc.ResponseFailedException( {
+      'code': lsp.Errors.ContentModified.code,
+      'message': lsp.Errors.ContentModified.reason
+    } )
+
+    def BuildLspRequest( request_id: int ) -> bytes:
+      return str( request_id ).encode( 'utf-8' )
+
+    with patch.object(
+        connection,
+        'GetResponse',
+        side_effect = content_modified
+    ) as get_response:
+      assert_that(
+        calling( lsc._GetResponseWithRetries ).with_args(
+          connection,
+          BuildLspRequest,
+          { lsp.Errors.ContentModified.code },
+          1
+        ),
+        raises( lsc.ResponseFailedException )
+      )
+
+    assert_that( get_response.call_count, equal_to( 3 ) )
 
 
   def test_LanguageServerCompleter_DistanceOfPointToRange_SingleLineRange(

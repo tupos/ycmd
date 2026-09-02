@@ -15,6 +15,7 @@
 # You should have received a copy of the GNU General Public License
 # along with ycmd.  If not, see <http://www.gnu.org/licenses/>.
 
+from collections.abc import Callable, Collection
 from functools import partial
 from pathlib import Path
 import abc
@@ -34,6 +35,7 @@ from watchdog.observers import Observer
 from ycmd import extra_conf_store, responses, utils
 from ycmd.completers.completer import Completer, CompletionsCache
 from ycmd.completers.completer_utils import GetFileContents, GetFileLines
+from ycmd.request_wrap import RequestWrap
 from ycmd.utils import LOGGER
 
 from ycmd.completers.language_server import language_server_protocol as lsp
@@ -1661,7 +1663,10 @@ class LanguageServerCompleter( Completer ):
     return result
 
 
-  def ComputeSemanticTokens( self, request_data ):
+  def ComputeSemanticTokens(
+      self,
+      request_data: RequestWrap
+  ) -> dict[ str, object ]:
     if not self._initialize_event.wait( REQUEST_TIMEOUT_COMPLETION ):
       return {}
 
@@ -1677,14 +1682,21 @@ class LanguageServerCompleter( Completer ):
 
     self._UpdateServerWithCurrentFileContents( request_data )
 
-    request_id = self.GetConnection().NextRequestId()
-    body = lsp.SemanticTokens( request_id, range_supported, request_data )
-
-    for _ in RetryOnFailure( [ lsp.Errors.ContentModified ] ):
-      response = self._connection.GetResponse(
+    def BuildSemanticTokensRequest(
+        request_id: int
+    ) -> bytes:
+      return lsp.SemanticTokens(
         request_id,
-        body,
-        3 * REQUEST_TIMEOUT_COMPLETION )
+        range_supported,
+        request_data
+      )
+
+    response = _GetResponseWithRetries(
+      self.GetConnection(),
+      BuildSemanticTokensRequest,
+      { lsp.Errors.ContentModified.code },
+      3 * REQUEST_TIMEOUT_COMPLETION
+    )
 
     if response is None:
       return {}
@@ -1702,7 +1714,10 @@ class LanguageServerCompleter( Completer ):
     }
 
 
-  def ComputeInlayHints( self, request_data ):
+  def ComputeInlayHints(
+      self,
+      request_data: RequestWrap
+  ) -> list[ dict[ str, object ] ]:
     if not self._initialize_event.wait( REQUEST_TIMEOUT_COMPLETION ):
       return []
 
@@ -1714,14 +1729,18 @@ class LanguageServerCompleter( Completer ):
       return []
 
     self._UpdateServerWithCurrentFileContents( request_data )
-    request_id = self.GetConnection().NextRequestId()
-    body = lsp.InlayHints( request_id, request_data )
 
-    for _ in RetryOnFailure( [ lsp.Errors.ContentModified ] ):
-      response = self._connection.GetResponse(
-        request_id,
-        body,
-        3 * REQUEST_TIMEOUT_COMPLETION )
+    def BuildInlayHintsRequest(
+        request_id: int
+    ) -> bytes:
+      return lsp.InlayHints( request_id, request_data )
+
+    response = _GetResponseWithRetries(
+      self.GetConnection(),
+      BuildInlayHintsRequest,
+      { lsp.Errors.ContentModified.code },
+      3 * REQUEST_TIMEOUT_COMPLETION
+    )
 
     if response is None:
       return []
@@ -3923,13 +3942,27 @@ def _IsCapabilityProvided( capabilities, query ):
   return bool( capability ) or capability == {}
 
 
-def RetryOnFailure( expected_error_codes, num_retries = 3 ):
-  for i in range( num_retries ):
+def _GetResponseWithRetries(
+    connection: LanguageServerConnection,
+    build_request: Callable[ [ int ], bytes ],
+    retryable_error_codes: Collection[ int ],
+    timeout: float,
+    num_attempts: int = 3
+) -> dict[ str, object ] | None:
+  response: dict[ str, object ] | None = None
+
+  for attempt in range( num_attempts ):
+    request_id: int = connection.NextRequestId()
     try:
-      yield
+      response = connection.GetResponse(
+        request_id,
+        build_request( request_id ),
+        timeout
+      )
       break
-    except ResponseFailedException as e:
-      if i < ( num_retries - 1 ) and e.error_code in expected_error_codes:
-        continue
-      else:
+    except ResponseFailedException as exception:
+      if ( attempt == num_attempts - 1 or
+           exception.error_code not in retryable_error_codes ):
         raise
+
+  return response
