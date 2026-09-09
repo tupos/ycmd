@@ -847,6 +847,9 @@ class TCPSingleStreamConnection( LanguageServerConnection ):
 
     self.port = port
     self._client_socket = None
+    # A socket may accept only part of a message in one send call. Keep the
+    # complete partial-send loop atomic relative to other writers.
+    self._write_mutex: threading.Lock = threading.Lock()
 
 
   def TryServerConnectionBlocking( self ):
@@ -879,21 +882,22 @@ class TCPSingleStreamConnection( LanguageServerConnection ):
     self._client_socket.close()
 
 
-  def WriteData( self, data ):
+  def WriteData( self, data: bytes ) -> None:
     assert self._connection_event.is_set()
     assert self._client_socket
 
-    total_sent = 0
-    while total_sent < len( data ):
-      try:
-        sent = self._client_socket.send( data[ total_sent: ] )
-      except OSError:
-        sent = 0
+    with self._write_mutex:
+      total_sent = 0
+      while total_sent < len( data ):
+        try:
+          sent = self._client_socket.send( data[ total_sent: ] )
+        except OSError:
+          sent = 0
 
-      if sent == 0:
-        raise RuntimeError( 'Socket was closed when writing' )
+        if sent == 0:
+          raise RuntimeError( 'Socket was closed when writing' )
 
-      total_sent += sent
+        total_sent += sent
 
 
   def ReadData( self, size=-1 ):

@@ -22,6 +22,7 @@ from unittest import TestCase
 from ycmd.tests.language_server import MockConnection
 from ycmd.completers.language_server import language_server_protocol as lsp
 
+import threading
 import queue
 
 
@@ -83,6 +84,74 @@ class LanguageServerConnectionTest( TestCase ):
       connection.run()
       assert_that( calling( response.AwaitResponse ).with_args( 10 ),
                    raises( lsc.ResponseAbortedException ) )
+
+
+  def test_TCPSingleStreamConnection_SerializesConcurrentWrites(
+      self
+  ) -> None:
+    connection = lsc.TCPSingleStreamConnection(
+      project_directory = None,
+      watchdog_factory = None,
+      port = 0,
+      workspace_conf_handler = None
+    )
+    connection._connection_event.set()
+
+    first_message: bytes = b'first-message'
+    second_message: bytes = b'second-message'
+    first_message_split: int = 5
+    sent_chunks: list[ bytes ] = []
+    first_chunk_sent: threading.Event = threading.Event()
+    second_sender_started: threading.Event = threading.Event()
+    second_write_started: threading.Event = threading.Event()
+
+    def Send( data: bytes ) -> int:
+      if data == first_message:
+        sent_chunks.append( data[ :first_message_split ] )
+        first_chunk_sent.set()
+
+        # Give the second writer an opportunity to enter WriteData while this
+        # message is only partially written. With serialized writes it cannot
+        # reach send() until this writer has completed.
+        second_sender_started.wait( 1 )
+        second_write_started.wait( 0.5 )
+        return first_message_split
+
+      sent_chunks.append( data )
+      if data == second_message:
+        second_write_started.set()
+      return len( data )
+
+    client_socket: MagicMock = MagicMock()
+    client_socket.send.side_effect = Send
+    connection._client_socket = client_socket
+
+    def SendSecondMessage() -> None:
+      second_sender_started.set()
+      connection.WriteData( second_message )
+
+    first_sender: threading.Thread = threading.Thread(
+      target = connection.WriteData,
+      args = ( first_message, )
+    )
+    second_sender: threading.Thread = threading.Thread(
+      target = SendSecondMessage
+    )
+
+    first_sender.start()
+    assert_that( first_chunk_sent.wait( 1 ), equal_to( True ) )
+    second_sender.start()
+
+    first_sender.join( 2 )
+    second_sender.join( 2 )
+
+    assert_that( first_sender.is_alive(), equal_to( False ) )
+    assert_that( second_sender.is_alive(), equal_to( False ) )
+    assert_that( second_write_started.is_set(), equal_to( True ) )
+    assert_that(
+      b''.join( sent_chunks ),
+      equal_to( first_message + second_message )
+    )
 
 
   def test_LanguageServerConnection_ServerConnectionDies( self ):
