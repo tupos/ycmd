@@ -173,6 +173,17 @@ def BuildInlayHintsResponse( inlay_hints, errors = None ):
   }
 
 
+def BuildDocumentHighlightsResponse(
+    document_highlights: list[ dict[ str, object ] ] | None,
+    errors: list[ dict[ str, object ] ] | None = None
+) -> dict[ str, object ]:
+  return {
+    'document_highlights':
+      document_highlights if document_highlights else [],
+    'errors': errors if errors else [],
+  }
+
+
 # location.column_number_ is a byte offset
 def BuildLocationData( location ):
   return {

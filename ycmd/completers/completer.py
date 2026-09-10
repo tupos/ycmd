@@ -377,6 +377,13 @@ class Completer( metaclass = abc.ABCMeta ):
     return []
 
 
+  def ComputeDocumentHighlights(
+      self,
+      request_data: object
+  ) -> list[ dict[ str, object ] ]:
+    return []
+
+
   def DefinedSubcommands( self ):
     subcommands = sorted( self.GetSubcommandsMap().keys() )
     try:

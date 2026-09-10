@@ -1872,6 +1872,70 @@ class LanguageServerCompleter( Completer ):
     return [ BuildInlayHint( h ) for h in response.get( 'result' ) or [] ]
 
 
+  def ComputeDocumentHighlights(
+      self,
+      request_data: RequestWrap
+  ) -> list[ dict[ str, object ] ]:
+    if not self._initialize_event.wait( REQUEST_TIMEOUT_COMPLETION ):
+      return []
+
+    if not self._ServerIsInitialized():
+      return []
+
+    if not _IsCapabilityProvided(
+        self._server_capabilities,
+        'documentHighlightProvider'
+    ):
+      return []
+
+    self._UpdateServerWithCurrentFileContents( request_data )
+
+    def BuildDocumentHighlightsRequest(
+        request_id: int
+    ) -> bytes:
+      return lsp.DocumentHighlights( request_id, request_data )
+
+    response = _GetResponseWithRetries(
+      self.GetConnection(),
+      BuildDocumentHighlightsRequest,
+      { lsp.Errors.ContentModified.code },
+      3 * REQUEST_TIMEOUT_COMPLETION,
+      cancellation_context = request_data.cancellation_context
+    )
+
+    if response is None:
+      return []
+
+    filepath: str = request_data[ 'filepath' ]
+    file_contents: list[ str ] = GetFileLines( request_data, filepath )
+    highlights: list[ dict[ str, object ] ] = []
+
+    for document_highlight in response.get( 'result' ) or []:
+      kind_number: object = document_highlight.get(
+        'kind',
+        lsp.DocumentHighlightKind.TEXT
+      )
+      try:
+        kind: lsp.DocumentHighlightKind = lsp.DocumentHighlightKind(
+          kind_number
+        )
+      except ( TypeError, ValueError ):
+        kind = lsp.DocumentHighlightKind.TEXT
+
+      highlights.append( {
+        'range': responses.BuildRangeData(
+          _BuildRange(
+            file_contents,
+            filepath,
+            document_highlight[ 'range' ]
+          )
+        ),
+        'kind': kind.name.title(),
+      } )
+
+    return highlights
+
+
   def GetDetailedDiagnostic( self, request_data ):
     self._UpdateServerWithFileContents( request_data )
 

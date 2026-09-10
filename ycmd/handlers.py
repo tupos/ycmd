@@ -34,6 +34,7 @@ from ycmd.responses import ( BuildExceptionResponse,
                              BuildSignatureHelpAvailableResponse,
                              BuildSemanticTokensResponse,
                              BuildInlayHintsResponse,
+                             BuildDocumentHighlightsResponse,
                              SignatureHelpAvailalability,
                              ServerError,
                              UnknownExtraConf )
@@ -370,6 +371,46 @@ def GetInlayHints(
   # to offer anything of for that here.
   return _JsonResponse(
       BuildInlayHintsResponse( inlay_hints, errors = errors ), response )
+
+
+@app.post( '/document_highlights' )
+@_CancellableRequest
+def GetDocumentHighlights(
+    request: ycmd.web_plumbing.Request,
+    response: ycmd.web_plumbing.Response,
+    request_data: RequestWrap
+) -> str:
+  LOGGER.info( 'Received document highlights request' )
+
+  if not _server_state.FiletypeCompletionUsable(
+      request_data[ 'filetypes' ],
+      silent = True
+  ):
+    return _JsonResponse(
+      BuildDocumentHighlightsResponse( None ),
+      response
+    )
+
+  errors: list[ dict[ str, object ] ] | None = None
+  document_highlights: list[ dict[ str, object ] ] | None = None
+
+  try:
+    filetype_completer = _server_state.GetFiletypeCompleter(
+      request_data[ 'filetypes' ] )
+    document_highlights = filetype_completer.ComputeDocumentHighlights(
+      request_data )
+  except Exception as exception:
+    LOGGER.exception(
+      'Exception from semantic completer during document highlights request' )
+    errors = [ BuildExceptionResponse( exception, traceback.format_exc() ) ]
+
+  return _JsonResponse(
+    BuildDocumentHighlightsResponse(
+      document_highlights,
+      errors = errors
+    ),
+    response
+  )
 
 
 @app.post( '/filter_and_sort_candidates' )

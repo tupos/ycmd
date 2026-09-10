@@ -332,6 +332,114 @@ class MiscHandlersTest( TestCase ):
 
 
   @SharedYcmd
+  def test_MiscHandlers_DocumentHighlights_NoSemanticCompleter(
+      self,
+      app: object
+  ) -> None:
+    request_data: dict[ str, object ] = BuildRequest(
+      filetype = 'not_supported'
+    )
+
+    assert_that(
+      app.post_json( '/document_highlights', request_data ).json,
+      has_entries( {
+        'document_highlights': empty(),
+        'errors': empty(),
+      } )
+    )
+
+
+  @SharedYcmd
+  @patch(
+    'ycmd.completers.completer.Completer.ComputeDocumentHighlights',
+    return_value = [
+      {
+        'range': {
+          'start': {
+            'line_num': 1,
+            'column_num': 1,
+            'filepath': '/foo',
+          },
+          'end': {
+            'line_num': 1,
+            'column_num': 4,
+            'filepath': '/foo',
+          },
+        },
+        'kind': 'Read',
+      },
+    ]
+  )
+  def test_MiscHandlers_DocumentHighlights(
+      self,
+      app: object,
+      *_args: object
+  ) -> None:
+    request_data: dict[ str, object ] = BuildRequest(
+      filetype = 'dummy_filetype'
+    )
+
+    with PatchCompleter( DummyCompleter, filetype = 'dummy_filetype' ):
+      response: dict[ str, object ] = app.post_json(
+        '/document_highlights',
+        request_data
+      ).json
+
+    assert_that(
+      response,
+      has_entries( {
+        'document_highlights': contains_exactly(
+          has_entries( {
+            'kind': 'Read',
+            'range': has_entries( {
+              'start': has_entries( {
+                'line_num': 1,
+                'column_num': 1,
+              } ),
+              'end': has_entries( {
+                'line_num': 1,
+                'column_num': 4,
+              } ),
+            } ),
+          } )
+        ),
+        'errors': empty(),
+      } )
+    )
+
+
+  @SharedYcmd
+  @patch(
+    'ycmd.completers.completer.Completer.ComputeDocumentHighlights',
+    side_effect = RuntimeError( 'document highlights failed' )
+  )
+  def test_MiscHandlers_DocumentHighlights_Error(
+      self,
+      app: object,
+      *_args: object
+  ) -> None:
+    request_data: dict[ str, object ] = BuildRequest(
+      filetype = 'dummy_filetype'
+    )
+
+    with PatchCompleter( DummyCompleter, filetype = 'dummy_filetype' ):
+      response: dict[ str, object ] = app.post_json(
+        '/document_highlights',
+        request_data
+      ).json
+
+    assert_that(
+      response,
+      has_entries( {
+        'document_highlights': empty(),
+        'errors': contains_exactly(
+          ErrorMatcher( RuntimeError, 'document highlights failed' )
+        ),
+      } )
+    )
+
+
+  @SharedYcmd
   def test_MiscHandlers_RouteNotFound( self, app ):
     with PatchCompleter( DummyCompleter, filetype = 'dummy_filetype' ):
       response = app.get( '/not_found', expect_errors = True ).json

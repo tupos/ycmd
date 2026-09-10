@@ -40,6 +40,7 @@ from ycmd.completers.language_server.language_server_completer import (
     NO_HOVER_INFORMATION )
 from ycmd.completers.language_server import language_server_protocol as lsp
 from ycmd.tests.language_server import MockConnection
+from ycmd.request_cancellation import RequestCancellationRegistry
 from ycmd.request_wrap import RequestWrap
 from ycmd.tests.test_utils import ( BuildRequest,
                                     ChunkMatcher,
@@ -1750,6 +1751,159 @@ class LanguageServerCompleterTest( TestCase ):
         completer.ComputeInlayHints,
         { 'result': [] },
         [] )
+
+
+  @IsolatedYcmd()
+  def test_LanguageServerCompleter_ComputeDocumentHighlights_Unsupported(
+      self,
+      _app: object
+  ) -> None:
+    completer = MockCompleter()
+    completer._initialize_event.set()
+    completer._server_capabilities = {}
+    request_data = RequestWrap( BuildRequest( contents = '' ) )
+
+    with patch.object(
+        completer,
+        '_ServerIsInitialized',
+        return_value = True
+    ):
+      with patch.object(
+          completer.GetConnection(),
+          'GetResponse'
+      ) as get_response:
+        assert_that(
+          completer.ComputeDocumentHighlights( request_data ),
+          empty()
+        )
+
+    get_response.assert_not_called()
+
+
+  @IsolatedYcmd()
+  def test_LanguageServerCompleter_ComputeDocumentHighlights(
+      self,
+      _app: object
+  ) -> None:
+    completer = MockCompleter()
+    completer._started = True
+    completer._initialize_event.set()
+    completer._server_capabilities = {
+      'documentHighlightProvider': True,
+    }
+    filepath: str = os.path.realpath( '/foo' )
+    request_data_json: dict[ str, object ] = BuildRequest(
+      filepath = filepath,
+      contents = 'a😀b\nwrite\ntext',
+      line_num = 1,
+      column_num = 6
+    )
+    registry = RequestCancellationRegistry()
+
+    with registry.CancellableOperation( 17 ) as cancellation_context:
+      request_data = RequestWrap(
+        request_data_json,
+        cancellation_context = cancellation_context
+      )
+      with patch.object(
+          completer,
+          '_UpdateServerWithCurrentFileContents'
+      ):
+        with patch.object(
+            completer.GetConnection(),
+            'GetResponse',
+            return_value = {
+              'result': [
+                {
+                  'range': {
+                    'start': { 'line': 0, 'character': 3 },
+                    'end': { 'line': 0, 'character': 4 },
+                  },
+                  'kind': 2,
+                },
+                {
+                  'range': {
+                    'start': { 'line': 1, 'character': 0 },
+                    'end': { 'line': 1, 'character': 5 },
+                  },
+                  'kind': 3,
+                },
+                {
+                  'range': {
+                    'start': { 'line': 2, 'character': 0 },
+                    'end': { 'line': 2, 'character': 4 },
+                  },
+                },
+              ]
+            }
+        ) as get_response:
+          assert_that(
+            completer.ComputeDocumentHighlights( request_data ),
+            contains_exactly(
+              has_entries( {
+                'kind': 'Read',
+                'range': RangeMatcher( filepath, ( 1, 6 ), ( 1, 7 ) ),
+              } ),
+              has_entries( {
+                'kind': 'Write',
+                'range': RangeMatcher( filepath, ( 2, 1 ), ( 2, 6 ) ),
+              } ),
+              has_entries( {
+                'kind': 'Text',
+                'range': RangeMatcher( filepath, ( 3, 1 ), ( 3, 5 ) ),
+              } )
+            )
+          )
+
+      self.assertIs(
+        get_response.call_args.kwargs[ 'cancellation_context' ],
+        cancellation_context
+      )
+
+
+  @IsolatedYcmd()
+  def test_LanguageServerCompleter_ComputeDocumentHighlights_NullResult(
+      self,
+      _app: object
+  ) -> None:
+    completer = MockCompleter()
+    completer._started = True
+    completer._initialize_event.set()
+    completer._server_capabilities = {
+      'documentHighlightProvider': True,
+    }
+    request_data = RequestWrap( BuildRequest( contents = 'text' ) )
+
+    with patch.object(
+        completer,
+        '_UpdateServerWithCurrentFileContents'
+    ):
+      with patch.object(
+          completer.GetConnection(),
+          'GetResponse',
+          return_value = { 'result': None }
+      ):
+        assert_that(
+          completer.ComputeDocumentHighlights( request_data ),
+          empty()
+        )
+
+
+  @IsolatedYcmd()
+  def test_LanguageServerCompleter_ComputeDocumentHighlights_Retries(
+      self,
+      _app: object
+  ) -> None:
+    completer = MockCompleter()
+    completer._server_capabilities = {
+      'documentHighlightProvider': True,
+    }
+    _CheckContentModifiedRetry(
+      completer,
+      completer.ComputeDocumentHighlights,
+      { 'result': [] },
+      []
+    )
 
 
   def test_GetResponseWithRetries_DoesNotRetryUnexpectedFailure(

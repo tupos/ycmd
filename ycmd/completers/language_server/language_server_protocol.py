@@ -22,7 +22,7 @@ import os
 import json
 import hashlib
 import threading
-from typing import TypeAlias, TypeGuard
+from typing import Any, TypeAlias, TypeGuard
 from urllib.parse import urljoin, urlparse, unquote
 from urllib.request import pathname2url, url2pathname
 
@@ -176,6 +176,12 @@ INLAY_HINT_KIND = [
   "Type",
   "Parameter"
 ]
+
+
+class DocumentHighlightKind( enum.IntEnum ):
+  TEXT = 1
+  READ = 2
+  WRITE = 3
 
 
 class InvalidUriException( Exception ):
@@ -365,6 +371,9 @@ def Initialize( request_id,
             'properties': [ 'documentation', 'detail' ]
           },
         },
+      },
+      'documentHighlight': {
+        'dynamicRegistration': False,
       },
       'documentSymbol': {
         'symbolKind': {
@@ -565,6 +574,16 @@ def Hover( request_id, request_data ):
   return BuildRequest( request_id,
                        'textDocument/hover',
                        BuildTextDocumentPositionParams( request_data ) )
+
+
+def DocumentHighlights(
+    request_id: LspRequestId,
+    request_data: Any
+) -> bytes:
+  return BuildRequest(
+    request_id,
+    'textDocument/documentHighlight',
+    BuildTextDocumentPositionParams( request_data ) )
 
 
 def Definition( request_id, request_data ):
