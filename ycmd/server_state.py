@@ -15,11 +15,16 @@
 # You should have received a copy of the GNU General Public License
 # along with ycmd.  If not, see <http://www.gnu.org/licenses/>.
 
+from contextlib import AbstractContextManager
 import threading
 from importlib import import_module
 from ycmd.completers.general.general_completer_store import (
     GeneralCompleterStore )
 from ycmd.completers.language_server import generic_lsp_completer
+from ycmd.request_cancellation import (
+  CancellationContext,
+  RequestCancellationRegistry,
+)
 from ycmd.utils import LOGGER
 
 
@@ -43,11 +48,28 @@ class ServerState:
     self._filetype_completers = {}
     self._filetype_completers_lock = threading.Lock()
     self._gencomp = GeneralCompleterStore( self._user_options )
+    self._request_cancellations: RequestCancellationRegistry = (
+      RequestCancellationRegistry() )
 
 
   @property
   def user_options( self ):
     return self._user_options
+
+
+  def CancellableOperation(
+      self,
+      operation_id: int
+  ) -> AbstractContextManager[ CancellationContext ]:
+    return self._request_cancellations.CancellableOperation( operation_id )
+
+
+  def CancelOperation( self, operation_id: int ) -> bool:
+    return self._request_cancellations.CancelOperation( operation_id )
+
+
+  def RetireOperations( self, retired_operation_id: int ) -> None:
+    self._request_cancellations.RetireOperations( retired_operation_id )
 
 
   def Shutdown( self ):

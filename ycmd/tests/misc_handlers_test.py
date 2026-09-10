@@ -21,6 +21,7 @@ from unittest.mock import patch
 from unittest import TestCase
 import requests
 
+from ycmd import handlers
 from ycmd.web_plumbing import RouteNotFound
 from ycmd.tests import IsolatedYcmd, PathToTestFile, SharedYcmd
 from ycmd.tests.test_utils import ( BuildRequest,
@@ -28,9 +29,63 @@ from ycmd.tests.test_utils import ( BuildRequest,
                                     PatchCompleter,
                                     SignatureAvailableMatcher,
                                     ErrorMatcher )
+from ycmd.request_wrap import RequestWrap
+
+
+class RecordingCancellationCompleter( DummyCompleter ):
+  def __init__( self, user_options: dict[ str, object ] ) -> None:
+    super().__init__( user_options )
+    self.operation_id: int | None = None
+    self.cancellation_requested: bool = False
+
+
+  def ComputeCandidatesInner(
+      self,
+      request_data: RequestWrap
+  ) -> list[ object ]:
+    cancellation_context = request_data.cancellation_context
+    if cancellation_context is not None:
+      self.operation_id = cancellation_context.operation_id
+      self.cancellation_requested = (
+        cancellation_context.IsCancellationRequested()
+      )
+
+    return []
 
 
 class MiscHandlersTest( TestCase ):
+  @IsolatedYcmd()
+  def test_MiscHandlers_CancellationBeforeOperationStart(
+      self,
+      app: object
+  ) -> None:
+    with PatchCompleter(
+        RecordingCancellationCompleter,
+        filetype = 'cancellable' ):
+      completer = handlers._server_state.GetFiletypeCompleter(
+        [ 'cancellable' ] )
+
+      assert_that(
+        app.post_json(
+          '/cancel_request',
+          { 'operation_id': 7 }
+        ).json,
+        equal_to( True )
+      )
+
+      app.post_json(
+        '/completions',
+        BuildRequest(
+          filetype = 'cancellable',
+          force_semantic = True,
+          operation_id = 7
+        )
+      )
+
+    assert_that( completer.operation_id, equal_to( 7 ) )
+    assert_that( completer.cancellation_requested, equal_to( True ) )
+
+
   @SharedYcmd
   def test_MiscHandlers_Healthy( self, app ):
     assert_that( app.get( '/healthy' ).json, equal_to( True ) )

@@ -15,11 +15,14 @@
 # You should have received a copy of the GNU General Public License
 # along with ycmd.  If not, see <http://www.gnu.org/licenses/>.
 
+from collections.abc import Callable
+from functools import wraps
 import json
 import platform
 import sys
 import time
 import traceback
+from typing import TypeAlias
 
 
 import ycmd.web_plumbing
@@ -32,7 +35,10 @@ from ycmd.responses import ( BuildExceptionResponse,
                              BuildSemanticTokensResponse,
                              BuildInlayHintsResponse,
                              SignatureHelpAvailalability,
+                             ServerError,
                              UnknownExtraConf )
+from ycmd.request_cancellation import ( YCM_OPERATION_ID,
+                                        YCM_RETIRED_OPERATION_ID )
 from ycmd.request_wrap import RequestWrap
 from ycmd.completers.completer_utils import FilterAndSortCandidatesWrap
 from ycmd.utils import LOGGER, StartThread, ImportCore
@@ -43,6 +49,95 @@ _server_state = None
 _hmac_secret = bytes()
 app = ycmd.web_plumbing.AppProducer()
 wsgi_server = None
+
+
+CancellableRequestHandler: TypeAlias = Callable[
+  [ ycmd.web_plumbing.Request,
+    ycmd.web_plumbing.Response,
+    RequestWrap ],
+  str
+]
+
+
+def _OptionalOperationId(
+    request_json: dict[ str, object ],
+    key: str
+) -> int | None:
+  value = request_json.get( key )
+  if value is None:
+    return None
+
+  if type( value ) is not int or value < 0:
+    raise ServerError( f'{ key } must be a non-negative integer' )
+
+  return value
+
+
+def _RetireOperations( request_json: dict[ str, object ] ) -> None:
+  retired_operation_id = _OptionalOperationId(
+    request_json,
+    YCM_RETIRED_OPERATION_ID
+  )
+  if retired_operation_id is not None:
+    _server_state.RetireOperations( retired_operation_id )
+
+
+def _CancellableRequest(
+    handler: CancellableRequestHandler
+) -> ycmd.web_plumbing.CallbackType:
+  @wraps( handler )
+  def Wrapper(
+      request: ycmd.web_plumbing.Request,
+      response: ycmd.web_plumbing.Response
+  ) -> str:
+    request_json: dict[ str, object ] = request.json
+    _RetireOperations( request_json )
+
+    operation_id = _OptionalOperationId(
+      request_json,
+      YCM_OPERATION_ID
+    )
+    if operation_id is None:
+      return handler(
+        request,
+        response,
+        RequestWrap( request_json )
+      )
+
+    with _server_state.CancellableOperation(
+        operation_id ) as cancellation_context:
+      return handler(
+        request,
+        response,
+        RequestWrap(
+          request_json,
+          cancellation_context = cancellation_context
+        )
+      )
+
+  return Wrapper
+
+
+@app.post( '/cancel_request' )
+def CancelRequest(
+    request: ycmd.web_plumbing.Request,
+    response: ycmd.web_plumbing.Response
+) -> str:
+  request_json: dict[ str, object ] = request.json
+  _RetireOperations( request_json )
+
+  operation_id = _OptionalOperationId(
+    request_json,
+    YCM_OPERATION_ID
+  )
+  if operation_id is None:
+    raise ServerError(
+      f'Request missing required field: { YCM_OPERATION_ID }' )
+
+  return _JsonResponse(
+    _server_state.CancelOperation( operation_id ),
+    response
+  )
 
 
 @app.post( '/event_notification' )
@@ -82,8 +177,12 @@ def GetSignatureHelpAvailable( request, response ):
 
 
 @app.post( '/run_completer_command' )
-def RunCompleterCommand( request, response ):
-  request_data = RequestWrap( request.json )
+@_CancellableRequest
+def RunCompleterCommand(
+    request: ycmd.web_plumbing.Request,
+    response: ycmd.web_plumbing.Response,
+    request_data: RequestWrap
+) -> str:
   completer = _GetCompleterForRequestData( request_data )
 
   return _JsonResponse( completer.OnUserCommand(
@@ -92,16 +191,24 @@ def RunCompleterCommand( request, response ):
 
 
 @app.post( '/resolve_fixit' )
-def ResolveFixit( request, response ):
-  request_data = RequestWrap( request.json )
+@_CancellableRequest
+def ResolveFixit(
+    request: ycmd.web_plumbing.Request,
+    response: ycmd.web_plumbing.Response,
+    request_data: RequestWrap
+) -> str:
   completer = _GetCompleterForRequestData( request_data )
 
   return _JsonResponse( completer.ResolveFixit( request_data ), response )
 
 
 @app.post( '/completions' )
-def GetCompletions( request, response ):
-  request_data = RequestWrap( request.json )
+@_CancellableRequest
+def GetCompletions(
+    request: ycmd.web_plumbing.Request,
+    response: ycmd.web_plumbing.Response,
+    request_data: RequestWrap
+) -> str:
   do_filetype_completion = _server_state.ShouldUseFiletypeCompleter(
     request_data )
   LOGGER.debug( 'Using filetype completion: %s', do_filetype_completion )
@@ -137,8 +244,12 @@ def GetCompletions( request, response ):
 
 
 @app.post( '/resolve_completion' )
-def ResolveCompletionItem( request, response ):
-  request_data = RequestWrap( request.json )
+@_CancellableRequest
+def ResolveCompletionItem(
+    request: ycmd.web_plumbing.Request,
+    response: ycmd.web_plumbing.Response,
+    request_data: RequestWrap
+) -> str:
   completer = _GetCompleterForRequestData( request_data )
 
   errors = None
@@ -153,8 +264,12 @@ def ResolveCompletionItem( request, response ):
 
 
 @app.post( '/signature_help' )
-def GetSignatureHelp( request, response ):
-  request_data = RequestWrap( request.json )
+@_CancellableRequest
+def GetSignatureHelp(
+    request: ycmd.web_plumbing.Request,
+    response: ycmd.web_plumbing.Response,
+    request_data: RequestWrap
+) -> str:
 
   if not _server_state.FiletypeCompletionUsable( request_data[ 'filetypes' ],
                                                  silent = True ):
@@ -178,9 +293,13 @@ def GetSignatureHelp( request, response ):
 
 
 @app.post( '/semantic_tokens' )
-def GetSemanticTokens( request, response ):
+@_CancellableRequest
+def GetSemanticTokens(
+    request: ycmd.web_plumbing.Request,
+    response: ycmd.web_plumbing.Response,
+    request_data: RequestWrap
+) -> str:
   LOGGER.info( 'Received semantic tokens request' )
-  request_data = RequestWrap( request.json )
 
   if not _server_state.FiletypeCompletionUsable( request_data[ 'filetypes' ],
                                                  silent = True ):
@@ -206,9 +325,13 @@ def GetSemanticTokens( request, response ):
 
 
 @app.post( '/inlay_hints' )
-def GetInlayHints( request, response ):
+@_CancellableRequest
+def GetInlayHints(
+    request: ycmd.web_plumbing.Request,
+    response: ycmd.web_plumbing.Response,
+    request_data: RequestWrap
+) -> str:
   LOGGER.info( 'Received inlay hints request' )
-  request_data = RequestWrap( request.json )
 
   if not _server_state.FiletypeCompletionUsable( request_data[ 'filetypes' ],
                                                  silent = True ):
