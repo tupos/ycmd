@@ -1774,7 +1774,8 @@ class LanguageServerCompleterTest( TestCase ):
           connection,
           BuildLspRequest,
           { lsp.Errors.ContentModified.code },
-          1
+          1,
+          cancellation_context = None
         ),
         raises( lsc.ResponseFailedException )
       )
@@ -1804,7 +1805,8 @@ class LanguageServerCompleterTest( TestCase ):
           connection,
           BuildLspRequest,
           { lsp.Errors.ContentModified.code },
-          1
+          1,
+          cancellation_context = None
         ),
         raises( lsc.ResponseFailedException )
       )

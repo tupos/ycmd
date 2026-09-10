@@ -36,6 +36,7 @@ from ycmd import extra_conf_store, responses, utils
 from ycmd.completers.completer import Completer, CompletionsCache
 from ycmd.completers.completer_utils import GetFileContents, GetFileLines
 from ycmd.request_wrap import RequestWrap
+from ycmd.request_cancellation import CancellationContext
 from ycmd.utils import LOGGER
 
 from ycmd.completers.language_server import language_server_protocol as lsp
@@ -158,6 +159,12 @@ class ResponseFailedException( Exception ):
                       f'{ self.error_message }' )
 
 
+class ResponseCancelledException( ResponseFailedException ):
+  """Raised when a server terminates a cancelled request with the LSP
+  RequestCancelled error."""
+  pass
+
+
 class IncompatibleCompletionException( Exception ):
   """Internal exception returned when a completion item is encountered which is
   not supported by ycmd, or where the completion item is invalid."""
@@ -187,7 +194,10 @@ class Response:
   the associated response is read, which triggers the |AwaitResponse| method to
   handle the actual response"""
 
-  def __init__( self, response_callback=None ):
+  def __init__(
+      self,
+      response_callback: Callable[ [ object, object ], None ] | None = None
+  ) -> None:
     """In order to receive a callback in the message pump thread context, supply
     a method taking ( response, message ) in |response_callback|. Note that
     |response| is _this object_, not the calling object, and message is the
@@ -196,6 +206,17 @@ class Response:
     self._event = threading.Event()
     self._message = None
     self._response_callback = response_callback
+    self._cancellation_requested: bool = False
+
+
+  def MarkCancellationRequested( self ) -> bool:
+    """Mark this pending response as having had cancellation requested.
+
+    Return whether the caller should send the cancellation notification.
+    """
+    was_requested = self._cancellation_requested
+    self._cancellation_requested = True
+    return not was_requested
 
 
   def ResponseReceived( self, message ):
@@ -213,10 +234,11 @@ class Response:
     self.ResponseReceived( None )
 
 
-  def AwaitResponse( self, timeout ):
+  def AwaitResponse( self, timeout: float ) -> dict[ str, object ]:
     """Called by clients to wait synchronously for either a response to be
     received or for |timeout| seconds to have passed.
     Returns the message, or:
+        - throws ResponseCancelledException if the request was cancelled
         - throws ResponseFailedException if the request fails
         - throws ResponseTimeoutException in case of timeout
         - throws ResponseAbortedException in case the server is shut down."""
@@ -230,6 +252,8 @@ class Response:
 
     if 'error' in self._message:
       error = self._message[ 'error' ]
+      if error.get( 'code' ) == lsp.Errors.RequestCancelled.code:
+        raise ResponseCancelledException( error )
       raise ResponseFailedException( error )
 
     return self._message
@@ -464,11 +488,39 @@ class LanguageServerConnection( threading.Thread ):
     return response
 
 
-  def GetResponse( self, request_id, message, timeout ):
+  def GetResponse(
+      self,
+      request_id: lsp.LspRequestId,
+      message: bytes,
+      timeout: float,
+      *,
+      cancellation_context: CancellationContext | None
+  ) -> dict[ str, object ]:
     """Issue a request to the server and await the response. See
     Response.AwaitResponse for return values and exceptions."""
     response = self.GetResponseAsync( request_id, message )
-    return response.AwaitResponse( timeout )
+
+    if cancellation_context is None:
+      return response.AwaitResponse( timeout )
+
+    with cancellation_context.TrackRequest( self, request_id ):
+      return response.AwaitResponse( timeout )
+
+
+  def CancelRequest( self, request_id: lsp.LspRequestId ) -> bool:
+    """Request cancellation of an outstanding LSP request.
+
+    Return whether a cancellation notification was sent.
+    """
+    with self._response_mutex:
+      response = self._responses.get( request_id )
+      if response is None or not response.MarkCancellationRequested():
+        return False
+
+    # Do not remove the response from _responses. JSON-RPC requires the server
+    # to send a terminal response even after cancellation.
+    self.SendNotification( lsp.CancelRequest( request_id ) )
+    return True
 
 
   def SendNotification( self, message ):
@@ -1317,9 +1369,13 @@ class LanguageServerCompleter( Completer ):
       msg = lsp.Shutdown( request_id )
 
       try:
-        self.GetConnection().GetResponse( request_id,
-                                          msg,
-                                          REQUEST_TIMEOUT_INITIALISE )
+        # Shutdown is protocol lifecycle work, not part of a cancellable YCM
+        # operation.
+        self.GetConnection().GetResponse(
+          request_id,
+          msg,
+          REQUEST_TIMEOUT_INITIALISE,
+          cancellation_context = None )
       except ResponseAbortedException:
         # When the language server (heinously) dies handling the shutdown
         # request, it is aborted. Just return - we're done.
@@ -1413,9 +1469,11 @@ class LanguageServerCompleter( Completer ):
     request_id = self.GetConnection().NextRequestId()
 
     msg = lsp.Completion( request_id, request_data, codepoint )
-    response = self.GetConnection().GetResponse( request_id,
-                                                 msg,
-                                                 REQUEST_TIMEOUT_COMPLETION )
+    response = self.GetConnection().GetResponse(
+      request_id,
+      msg,
+      REQUEST_TIMEOUT_COMPLETION,
+      cancellation_context = request_data.cancellation_context )
     result = response.get( 'result' ) or []
 
     if isinstance( result, list ):
@@ -1489,14 +1547,19 @@ class LanguageServerCompleter( Completer ):
       request_data )[ 0 ]
 
 
-  def _ResolveCompletionItem( self, item ):
+  def _ResolveCompletionItem(
+      self,
+      item: dict[ str, object ],
+      cancellation_context: CancellationContext | None
+  ) -> dict[ str, object ]:
     try:
       resolve_id = self.GetConnection().NextRequestId()
       resolve = lsp.ResolveCompletion( resolve_id, item )
       response = self.GetConnection().GetResponse(
         resolve_id,
         resolve,
-        REQUEST_TIMEOUT_COMPLETION )
+        REQUEST_TIMEOUT_COMPLETION,
+        cancellation_context = cancellation_context )
       item.clear()
       item.update( response[ 'result' ] )
     except ResponseFailedException:
@@ -1565,7 +1628,10 @@ class LanguageServerCompleter( Completer ):
       if ( resolve_completions and
            not this_tem_is_resolved and
            self._resolve_completion_items ):
-        self._ResolveCompletionItem( item )
+        self._ResolveCompletionItem(
+          item,
+          request_data.cancellation_context
+        )
         item[ '_resolved' ] = True
         this_tem_is_resolved = True
 
@@ -1639,9 +1705,11 @@ class LanguageServerCompleter( Completer ):
 
     request_id = self.GetConnection().NextRequestId()
     msg = lsp.SignatureHelp( request_id, request_data )
-    response = self.GetConnection().GetResponse( request_id,
-                                                 msg,
-                                                 REQUEST_TIMEOUT_COMPLETION )
+    response = self.GetConnection().GetResponse(
+      request_id,
+      msg,
+      REQUEST_TIMEOUT_COMPLETION,
+      cancellation_context = request_data.cancellation_context )
 
     result = response[ 'result' ]
     if result is None:
@@ -1699,7 +1767,8 @@ class LanguageServerCompleter( Completer ):
       self.GetConnection(),
       BuildSemanticTokensRequest,
       { lsp.Errors.ContentModified.code },
-      3 * REQUEST_TIMEOUT_COMPLETION
+      3 * REQUEST_TIMEOUT_COMPLETION,
+      cancellation_context = request_data.cancellation_context
     )
 
     if response is None:
@@ -1743,7 +1812,8 @@ class LanguageServerCompleter( Completer ):
       self.GetConnection(),
       BuildInlayHintsRequest,
       { lsp.Errors.ContentModified.code },
-      3 * REQUEST_TIMEOUT_COMPLETION
+      3 * REQUEST_TIMEOUT_COMPLETION,
+      cancellation_context = request_data.cancellation_context
     )
 
     if response is None:
@@ -2727,7 +2797,8 @@ class LanguageServerCompleter( Completer ):
     response = self.GetConnection().GetResponse(
       request_id,
       lsp.Hover( request_id, request_data ),
-      REQUEST_TIMEOUT_COMMAND )
+      REQUEST_TIMEOUT_COMMAND,
+      cancellation_context = request_data.cancellation_context )
 
     result = response[ 'result' ]
     if result:
@@ -2742,7 +2813,8 @@ class LanguageServerCompleter( Completer ):
       result = self.GetConnection().GetResponse(
         request_id,
         getattr( lsp, handler )( request_id, request_data ),
-        REQUEST_TIMEOUT_COMMAND )[ 'result' ]
+        REQUEST_TIMEOUT_COMMAND,
+        cancellation_context = request_data.cancellation_context )[ 'result' ]
     except ResponseFailedException:
       result = None
 
@@ -2791,7 +2863,8 @@ class LanguageServerCompleter( Completer ):
     response = self.GetConnection().GetResponse(
       request_id,
       lsp.WorkspaceSymbol( request_id, query ),
-      REQUEST_TIMEOUT_COMMAND )
+      REQUEST_TIMEOUT_COMMAND,
+      cancellation_context = request_data.cancellation_context )
 
     result = response.get( 'result' ) or []
     return _LspSymbolListToGoTo( request_data, result )
@@ -2805,9 +2878,11 @@ class LanguageServerCompleter( Completer ):
 
     request_id = self.GetConnection().NextRequestId()
     message = lsp.DocumentSymbol( request_id, request_data )
-    response = self.GetConnection().GetResponse( request_id,
-                                                 message,
-                                                 REQUEST_TIMEOUT_COMMAND )
+    response = self.GetConnection().GetResponse(
+      request_id,
+      message,
+      REQUEST_TIMEOUT_COMMAND,
+      cancellation_context = request_data.cancellation_context )
 
     result = response.get( 'result' ) or []
 
@@ -2830,7 +2905,8 @@ class LanguageServerCompleter( Completer ):
     prepare_response = self.GetConnection().GetResponse(
         request_id,
         message,
-        REQUEST_TIMEOUT_COMMAND )
+        REQUEST_TIMEOUT_COMMAND,
+        cancellation_context = request_data.cancellation_context )
     preparation_item = prepare_response.get( 'result' ) or []
     if not preparation_item:
       raise RuntimeError( f'No { kind } hierarchy found.' )
@@ -2869,9 +2945,11 @@ class LanguageServerCompleter( Completer ):
     self._UpdateServerWithFileContents( request_data )
     request_id = self.GetConnection().NextRequestId()
     message = lsp.Hierarchy( request_id, kind, direction, preparation_item )
-    response = self.GetConnection().GetResponse( request_id,
-                                                 message,
-                                                 REQUEST_TIMEOUT_COMMAND )
+    response = self.GetConnection().GetResponse(
+      request_id,
+      message,
+      REQUEST_TIMEOUT_COMMAND,
+      cancellation_context = request_data.cancellation_context )
 
     result = response.get( 'result' )
     if result:
@@ -2920,7 +2998,8 @@ class LanguageServerCompleter( Completer ):
     prepare_response = self.GetConnection().GetResponse(
         request_id,
         message,
-        REQUEST_TIMEOUT_COMMAND )
+        REQUEST_TIMEOUT_COMMAND,
+        cancellation_context = request_data.cancellation_context )
     preparation_item = prepare_response.get( 'result' ) or []
     if not preparation_item:
       raise RuntimeError( f'No { args[ 0 ] } calls found.' )
@@ -2936,9 +3015,11 @@ class LanguageServerCompleter( Completer ):
                              'call',
                              args[ 0 ] + 'Calls',
                              preparation_item )
-    response = self.GetConnection().GetResponse( request_id,
-                                                 message,
-                                                 REQUEST_TIMEOUT_COMMAND )
+    response = self.GetConnection().GetResponse(
+      request_id,
+      message,
+      REQUEST_TIMEOUT_COMMAND,
+      cancellation_context = request_data.cancellation_context )
 
     result = response.get( 'result' ) or []
     goto_response = []
@@ -3004,7 +3085,8 @@ class LanguageServerCompleter( Completer ):
                       request_data,
                       cursor_range_ls,
                       matched_diagnostics ),
-      REQUEST_TIMEOUT_COMMAND )
+      REQUEST_TIMEOUT_COMMAND,
+      cancellation_context = request_data.cancellation_context )
     return self.CodeActionResponseToFixIts( request_data,
                                             code_actions[ 'result' ] )
 
@@ -3088,7 +3170,8 @@ class LanguageServerCompleter( Completer ):
       response = self.GetConnection().GetResponse(
         request_id,
         lsp.Rename( request_id, request_data, new_name ),
-        REQUEST_TIMEOUT_COMMAND )
+        REQUEST_TIMEOUT_COMMAND,
+        cancellation_context = request_data.cancellation_context )
     except ResponseFailedException:
       raise RuntimeError( 'Cannot rename the symbol under cursor.' )
 
@@ -3115,9 +3198,11 @@ class LanguageServerCompleter( Completer ):
     else:
       message = lsp.Formatting( request_id, request_data )
 
-    response = self.GetConnection().GetResponse( request_id,
-                                                 message,
-                                                 REQUEST_TIMEOUT_COMMAND )
+    response = self.GetConnection().GetResponse(
+      request_id,
+      message,
+      REQUEST_TIMEOUT_COMMAND,
+      cancellation_context = request_data.cancellation_context )
     filepath = request_data[ 'filepath' ]
     contents = GetFileLines( request_data, filepath )
     chunks = [ responses.FixItChunk( text_edit[ 'newText' ],
@@ -3150,7 +3235,9 @@ class LanguageServerCompleter( Completer ):
           code_action = self.GetConnection().GetResponse(
               request_id,
               msg,
-              REQUEST_TIMEOUT_COMMAND )[ 'result' ]
+              REQUEST_TIMEOUT_COMMAND,
+              cancellation_context = request_data.cancellation_context
+          )[ 'result' ]
         except ResponseFailedException:
           # Even if resolving has failed, we might still be able to apply
           # what we have previously received...
@@ -3252,9 +3339,11 @@ class LanguageServerCompleter( Completer ):
 
     request_id = self.GetConnection().NextRequestId()
     message = lsp.ExecuteCommand( request_id, command, arguments )
-    response = self.GetConnection().GetResponse( request_id,
-                                                 message,
-                                                 REQUEST_TIMEOUT_COMMAND )
+    response = self.GetConnection().GetResponse(
+      request_id,
+      message,
+      REQUEST_TIMEOUT_COMMAND,
+      cancellation_context = request_data.cancellation_context )
     return response[ 'result' ]
 
 
@@ -3951,6 +4040,8 @@ def _GetResponseWithRetries(
     build_request: Callable[ [ int ], bytes ],
     retryable_error_codes: Collection[ int ],
     timeout: float,
+    *,
+    cancellation_context: CancellationContext | None,
     num_attempts: int = 3
 ) -> dict[ str, object ] | None:
   response: dict[ str, object ] | None = None
@@ -3961,7 +4052,8 @@ def _GetResponseWithRetries(
       response = connection.GetResponse(
         request_id,
         build_request( request_id ),
-        timeout
+        timeout,
+        cancellation_context = cancellation_context
       )
       break
     except ResponseFailedException as exception:

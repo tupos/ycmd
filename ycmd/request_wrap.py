@@ -15,6 +15,7 @@
 # You should have received a copy of the GNU General Public License
 # along with ycmd.  If not, see <http://www.gnu.org/licenses/>.
 
+from ycmd.request_cancellation import CancellationContext
 from ycmd.utils import ( ByteOffsetToCodepointOffset,
                          CodepointOffsetToByteOffset,
                          HashableDict,
@@ -29,10 +30,16 @@ from ycmd.request_validation import EnsureRequestValid
 # TODO: Change the custom computed (and other) keys to be actual properties on
 # the object.
 class RequestWrap:
-  def __init__( self, request, validate = True ):
+  def __init__(
+      self,
+      request: dict[ str, object ],
+      validate: bool = True,
+      cancellation_context: CancellationContext | None = None
+  ) -> None:
     if validate:
       EnsureRequestValid( request )
     self._request = request
+    self._cancellation_context = cancellation_context
 
     # Maps the keys returned by this objects __getitem__ to a # tuple of
     # ( getter_method, setter_method ). Values computed by getter_method (or set
@@ -85,6 +92,11 @@ class RequestWrap:
       'extra_conf_data': ( self._GetExtraConfData, None ),
     }
     self._cached_computed = {}
+
+
+  @property
+  def cancellation_context( self ) -> CancellationContext | None:
+    return self._cancellation_context
 
 
   def __getitem__( self, key ):

@@ -322,9 +322,10 @@ class ClangdCompleter( language_server_completer.LanguageServerCompleter ):
                                  "textDocument/switchSourceHeader",
                                  { "uri": uri } )
     response = self.GetConnection().GetResponse(
-            request_id,
-            request,
-            language_server_completer.REQUEST_TIMEOUT_COMMAND )
+      request_id,
+      request,
+      language_server_completer.REQUEST_TIMEOUT_COMMAND,
+      cancellation_context = request_data.cancellation_context )
     filepath = lsp.UriToFilePath( response[ 'result' ] )
     # We don't have a specific location in the file we need to go to so
     # we just arbitrarily choose line 1, column 1. The client can choose

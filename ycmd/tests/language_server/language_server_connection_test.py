@@ -20,6 +20,7 @@ from ycmd.completers.language_server import language_server_completer as lsc
 from hamcrest import assert_that, calling, equal_to, raises
 from unittest import TestCase
 from ycmd.tests.language_server import MockConnection
+from ycmd.request_cancellation import RequestCancellationRegistry
 from ycmd.completers.language_server import language_server_protocol as lsp
 
 import threading
@@ -151,6 +152,107 @@ class LanguageServerConnectionTest( TestCase ):
     assert_that(
       b''.join( sent_chunks ),
       equal_to( first_message + second_message )
+    )
+
+
+  def test_LanguageServerConnection_CancelsPendingRequestOnce( self ) -> None:
+    connection = MockConnection()
+    request_id: int = 7
+    response = connection.GetResponseAsync(
+      request_id,
+      bytes( b'{"test":"test"}' )
+    )
+
+    with patch.object( connection, 'SendNotification' ) as send_notification:
+      assert_that( connection.CancelRequest( request_id ), equal_to( True ) )
+      assert_that( connection.CancelRequest( request_id ), equal_to( False ) )
+
+    send_notification.assert_called_once_with(
+      lsp.CancelRequest( request_id )
+    )
+
+    terminal_response = {
+      'jsonrpc': '2.0',
+      'id': request_id,
+      'result': None,
+    }
+    connection._DispatchMessage( terminal_response )
+
+    assert_that(
+      response.AwaitResponse( 0 ),
+      equal_to( terminal_response )
+    )
+    assert_that( connection.CancelRequest( request_id ), equal_to( False ) )
+
+
+  def test_LanguageServerConnection_ReportsCancelledResponse(
+      self
+  ) -> None:
+    response = lsc.Response()
+    response.ResponseReceived( {
+      'jsonrpc': '2.0',
+      'id': 7,
+      'error': {
+        'code': lsp.Errors.RequestCancelled.code,
+        'message': lsp.Errors.RequestCancelled.reason,
+      },
+    } )
+
+    assert_that(
+      calling( response.AwaitResponse ).with_args( 0 ),
+      raises( lsc.ResponseCancelledException )
+    )
+
+
+  def test_LanguageServerConnection_DoesNotCancelUnknownRequest(
+      self
+  ) -> None:
+    connection = MockConnection()
+
+    with patch.object( connection, 'SendNotification' ) as send_notification:
+      assert_that( connection.CancelRequest( 7 ), equal_to( False ) )
+
+    send_notification.assert_not_called()
+
+
+  def test_LanguageServerConnection_TracksCancellationContext(
+      self
+  ) -> None:
+    connection = MockConnection()
+    registry = RequestCancellationRegistry()
+    request_id: int = 7
+    request_message = bytes( b'{"test":"test"}' )
+    cancellation_message = lsp.CancelRequest( request_id )
+    terminal_response = {
+      'jsonrpc': '2.0',
+      'id': request_id,
+      'result': None,
+    }
+    sent_messages: list[ bytes ] = []
+
+    def WriteData( message: bytes ) -> None:
+      sent_messages.append( message )
+      if message == cancellation_message:
+        connection._DispatchMessage( terminal_response )
+
+    with registry.CancellableOperation( 1 ) as cancellation_context:
+      registry.CancelOperation( 1 )
+
+      with patch.object( connection, 'WriteData', side_effect = WriteData ):
+        response = connection.GetResponse(
+          request_id,
+          request_message,
+          1,
+          cancellation_context = cancellation_context
+        )
+
+    assert_that( response, equal_to( terminal_response ) )
+    assert_that(
+      sent_messages,
+      equal_to( [
+        request_message,
+        cancellation_message,
+      ] )
     )
 
 
