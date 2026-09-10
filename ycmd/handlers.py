@@ -98,12 +98,21 @@ def _CancellableRequest(
       YCM_OPERATION_ID
     )
     if operation_id is None:
+      LOGGER.debug(
+        'Handling %s without cancellation metadata',
+        handler.__name__
+      )
       return handler(
         request,
         response,
         RequestWrap( request_json )
       )
 
+    LOGGER.debug(
+      'Handling %s as cancellable operation %d',
+      handler.__name__,
+      operation_id
+    )
     with _server_state.CancellableOperation(
         operation_id ) as cancellation_context:
       return handler(
@@ -134,8 +143,16 @@ def CancelRequest(
     raise ServerError(
       f'Request missing required field: { YCM_OPERATION_ID }' )
 
+  cancellation_was_effective: bool = _server_state.CancelOperation(
+    operation_id
+  )
+  LOGGER.debug(
+    'Processed cancellation request for operation %d (effective: %s)',
+    operation_id,
+    cancellation_was_effective
+  )
   return _JsonResponse(
-    _server_state.CancelOperation( operation_id ),
+    cancellation_was_effective,
     response
   )
 

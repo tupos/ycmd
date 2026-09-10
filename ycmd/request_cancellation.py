@@ -26,6 +26,7 @@ from typing import Protocol
 
 from ycmd.completers.language_server.language_server_protocol import (
   LspRequestId )
+from ycmd.utils import LOGGER
 
 
 # These JSON fields connect a YCM operation to the corresponding ycmd handler.
@@ -105,6 +106,13 @@ class RequestCancellationRegistry:
         cancellation_requested
       )
 
+    LOGGER.debug(
+      'Started cancellable operation %d '
+      '(cancellation already requested: %s)',
+      operation_id,
+      cancellation_requested
+    )
+
     try:
       yield context
     finally:
@@ -118,33 +126,66 @@ class RequestCancellationRegistry:
     arriving before operation startup is retained until that operation starts.
     """
     requests_to_cancel: tuple[ _RegisteredRequest, ... ] = ()
+    ignore_reason: str | None = None
+    cancellation_queued: bool = False
 
     with self._lock:
       if operation_id <= self._retired_operation_id:
-        return False
-
-      operation = self._active_operations.get( operation_id )
-      if operation is None:
-        if operation_id in self._pending_cancellations:
-          return False
-
-        self._pending_cancellations.add( operation_id )
-        heapq.heappush( self._pending_cancellation_heap, operation_id )
+        ignore_reason = (
+          f'operations retired through { self._retired_operation_id }'
+        )
       else:
-        if operation.cancellation_requested:
-          return False
+        operation = self._active_operations.get( operation_id )
+        if operation is None:
+          if operation_id in self._pending_cancellations:
+            ignore_reason = 'cancellation already queued'
+          else:
+            self._pending_cancellations.add( operation_id )
+            heapq.heappush(
+              self._pending_cancellation_heap,
+              operation_id
+            )
+            cancellation_queued = True
+        elif operation.cancellation_requested:
+          ignore_reason = 'cancellation already requested'
+        else:
+          operation.cancellation_requested = True
+          requests_to_cancel = tuple( operation.requests )
 
-        operation.cancellation_requested = True
-        requests_to_cancel = tuple( operation.requests )
+    if ignore_reason is not None:
+      LOGGER.debug(
+        'Ignored cancellation of operation %d: %s',
+        operation_id,
+        ignore_reason
+      )
+      return False
 
+    if cancellation_queued:
+      LOGGER.debug(
+        'Queued cancellation of operation %d before operation startup',
+        operation_id
+      )
+      return True
+
+    sent_cancellations: int = 0
     for request in requests_to_cancel:
-      request.connection.CancelRequest( request.request_id )
+      if request.connection.CancelRequest( request.request_id ):
+        sent_cancellations += 1
 
+    LOGGER.debug(
+      'Requested cancellation of operation %d with %d tracked LSP '
+      'request(s); sent %d cancellation notification(s)',
+      operation_id,
+      len( requests_to_cancel ),
+      sent_cancellations
+    )
     return True
 
 
   def RetireOperations( self, retired_operation_id: int ) -> None:
     """Discard cancellation state for IDs that YCM will never use again."""
+    discarded_pending_cancellations: int = 0
+
     with self._lock:
       if retired_operation_id <= self._retired_operation_id:
         return
@@ -157,6 +198,14 @@ class RequestCancellationRegistry:
               self._pending_cancellation_heap[ 0 ] <= retired_operation_id ):
         operation_id = heapq.heappop( self._pending_cancellation_heap )
         self._pending_cancellations.discard( operation_id )
+        discarded_pending_cancellations += 1
+
+    LOGGER.debug(
+      'Retired cancellable operations through %d; discarded %d pending '
+      'cancellation(s)',
+      retired_operation_id,
+      discarded_pending_cancellations
+    )
 
 
   def _RegisterRequest(
@@ -176,7 +225,18 @@ class RequestCancellationRegistry:
         )
 
       operation.requests.add( request )
-      return request, operation.cancellation_requested
+      cancellation_requested: bool = operation.cancellation_requested
+
+    LOGGER.debug(
+      'Registered LSP request %r with operation %d on connection %s@%x '
+      '(cancellation already requested: %s)',
+      request_id,
+      context.operation_id,
+      type( connection ).__name__,
+      id( connection ),
+      cancellation_requested
+    )
+    return request, cancellation_requested
 
 
   def _UnregisterRequest(
@@ -187,6 +247,14 @@ class RequestCancellationRegistry:
     with self._lock:
       operation = self._OperationStateForContext( context )
       operation.requests.discard( request )
+
+    LOGGER.debug(
+      'Stopped tracking LSP request %r for operation %d on connection %s@%x',
+      request.request_id,
+      context.operation_id,
+      type( request.connection ).__name__,
+      id( request.connection )
+    )
 
 
   def _IsCancellationRequested(
@@ -206,7 +274,14 @@ class RequestCancellationRegistry:
           f'Operation { context.operation_id } finished with active requests'
         )
 
+      cancellation_requested: bool = operation.cancellation_requested
       del self._active_operations[ context.operation_id ]
+
+    LOGGER.debug(
+      'Finished cancellable operation %d (cancellation requested: %s)',
+      context.operation_id,
+      cancellation_requested
+    )
 
 
   def _OperationStateForContext(
@@ -262,7 +337,14 @@ class CancellationContext:
 
     try:
       if cancellation_requested:
-        connection.CancelRequest( request_id )
+        cancellation_sent: bool = connection.CancelRequest( request_id )
+        LOGGER.debug(
+          'Applied queued cancellation from operation %d to LSP request %r '
+          '(notification sent: %s)',
+          self._operation_id,
+          request_id,
+          cancellation_sent
+        )
       yield
     finally:
       self._registry._UnregisterRequest( self, request )

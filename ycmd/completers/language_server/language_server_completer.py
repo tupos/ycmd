@@ -512,13 +512,37 @@ class LanguageServerConnection( threading.Thread ):
 
     Return whether a cancellation notification was sent.
     """
+    ignore_reason: str | None = None
+
     with self._response_mutex:
       response = self._responses.get( request_id )
-      if response is None or not response.MarkCancellationRequested():
-        return False
+      if response is None:
+        ignore_reason = 'request is no longer active'
+      elif not response.MarkCancellationRequested():
+        ignore_reason = 'cancellation was already requested'
+
+    if ignore_reason is not None:
+      LOGGER.debug(
+        'Did not cancel LSP request %r on connection %s@%x '
+        '(generation %d): %s',
+        request_id,
+        type( self ).__name__,
+        id( self ),
+        self._connection_generation,
+        ignore_reason
+      )
+      return False
 
     # Do not remove the response from _responses. JSON-RPC requires the server
     # to send a terminal response even after cancellation.
+    LOGGER.debug(
+      'Sending cancellation for LSP request %r on connection %s@%x '
+      '(generation %d)',
+      request_id,
+      type( self ).__name__,
+      id( self ),
+      self._connection_generation
+    )
     self.SendNotification( lsp.CancelRequest( request_id ) )
     return True
 
