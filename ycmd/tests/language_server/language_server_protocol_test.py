@@ -22,6 +22,20 @@ from ycmd.tests.test_utils import UnixOnly, WindowsOnly
 
 
 class LanguageServerProtocolTest( TestCase ):
+  def test_CancelRequest_BuildsNotification( self ) -> None:
+    message = lsp.CancelRequest( 'request-1' )
+    payload = message.split( b'\r\n\r\n', 1 )[ 1 ]
+
+    assert_that(
+      lsp.Parse( payload ),
+      equal_to( {
+        'jsonrpc': '2.0',
+        'method': '$/cancelRequest',
+        'params': { 'id': 'request-1' },
+      } )
+    )
+
+
   def test_WorkDoneProgressTracker_Lifecycle( self ):
     tracker = lsp.WorkDoneProgressTracker()
 

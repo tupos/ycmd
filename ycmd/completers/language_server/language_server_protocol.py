@@ -22,7 +22,7 @@ import os
 import json
 import hashlib
 import threading
-from typing import TypeGuard
+from typing import TypeAlias, TypeGuard
 from urllib.parse import urljoin, urlparse, unquote
 from urllib.request import pathname2url, url2pathname
 
@@ -31,6 +31,8 @@ from ycmd.utils import ( ByteOffsetToCodepointOffset,
                          ToUnicode,
                          UpdateDict )
 
+
+LspRequestId: TypeAlias = str | int
 
 Error = collections.namedtuple( 'RequestError', [ 'code', 'reason' ] )
 
@@ -271,7 +273,11 @@ class ServerFileState:
     return hashlib.sha1( ToBytes( contents ) )
 
 
-def BuildRequest( request_id, method, parameters ):
+def BuildRequest(
+    request_id: LspRequestId,
+    method: str,
+    parameters: object
+) -> bytes:
   """Builds a JSON RPC request message with the supplied ID, method and method
   parameters"""
   return _BuildMessageData( {
@@ -432,6 +438,10 @@ def Shutdown( request_id ):
 
 def Exit():
   return BuildNotification( 'exit', None )
+
+
+def CancelRequest( request_id: LspRequestId ) -> bytes:
+  return BuildNotification( '$/cancelRequest', { 'id': request_id } )
 
 
 def Void( request ):
