@@ -3300,7 +3300,11 @@ class LanguageServerCompleter( Completer ):
                                       kind )
 
 
-  def RefactorRename( self, request_data, args ):
+  def RefactorRename(
+      self,
+      request_data: RequestWrap,
+      args: list[ str ]
+  ) -> dict[ str, object ]:
     """Issues the rename request and returns the result as a FixIt response."""
     if not self.ServerIsReady():
       raise RuntimeError( 'Server is initializing. Please wait.' )
@@ -3311,15 +3315,40 @@ class LanguageServerCompleter( Completer ):
 
     self._UpdateServerWithFileContents( request_data )
 
-    new_name = args[ 0 ]
+    connection: LanguageServerConnection = self.GetConnection()
+    rename_provider: object = (
+      self._server_capabilities.get( 'renameProvider' )
+      if self._server_capabilities else None
+    )
 
-    request_id = self.GetConnection().NextRequestId()
+    if ( isinstance( rename_provider, dict ) and
+         rename_provider.get( 'prepareProvider' ) ):
+      prepare_request_id: int = connection.NextRequestId()
+      try:
+        prepare_response: dict[ str, object ] = connection.GetResponse(
+          prepare_request_id,
+          lsp.PrepareRename(
+            prepare_request_id,
+            request_data
+          ),
+          REQUEST_TIMEOUT_COMMAND,
+          cancellation_context = request_data.cancellation_context
+        )
+      except ResponseFailedException as exception:
+        raise RuntimeError( exception.error_message ) from exception
+
+      if prepare_response.get( 'result' ) is None:
+        raise RuntimeError( 'Cannot rename the symbol under cursor.' )
+
+    new_name: str = args[ 0 ]
+    request_id: int = connection.NextRequestId()
     try:
-      response = self.GetConnection().GetResponse(
+      response: dict[ str, object ] = connection.GetResponse(
         request_id,
         lsp.Rename( request_id, request_data, new_name ),
         REQUEST_TIMEOUT_COMMAND,
-        cancellation_context = request_data.cancellation_context )
+        cancellation_context = request_data.cancellation_context
+      )
     except ResponseFailedException:
       raise RuntimeError( 'Cannot rename the symbol under cursor.' )
 

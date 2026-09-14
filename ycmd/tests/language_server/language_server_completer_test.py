@@ -132,6 +132,44 @@ def _CheckContentModifiedRetry(
     contains_exactly( 1, 2 ) )
 
 
+def _RenameRequestData() -> RequestWrap:
+  filepath: str = os.path.realpath( '/foo' )
+  return RequestWrap( BuildRequest(
+    filepath = filepath,
+    contents = 'foo',
+    line_num = 1,
+    column_num = 1
+  ) )
+
+
+def _RenameWorkspaceEdit(
+    request_data: RequestWrap
+) -> dict[ str, object ]:
+  filepath: str = str( request_data[ 'filepath' ] )
+  return {
+    'changes': {
+      lsp.FilePathToUri( filepath ): [
+        {
+          'newText': 'bar',
+          'range': {
+            'start': { 'line': 0, 'character': 0 },
+            'end': { 'line': 0, 'character': 3 },
+          },
+        },
+      ],
+    },
+  }
+
+
+def _RequestedLspMethods( get_response: Mock ) -> list[ str ]:
+  return [
+    str( lsp.Parse(
+      request.args[ 1 ].split( b'\r\n\r\n', 1 )[ 1 ]
+    )[ 'method' ] )
+    for request in get_response.call_args_list
+  ]
+
+
 def _TupleToLSPRange( tuple ):
   return { 'line': tuple[ 0 ], 'character': tuple[ 1 ] }
 
@@ -1993,6 +2031,198 @@ class LanguageServerCompleterTest( TestCase ):
         completer.ComputeInlayHints,
         { 'result': [] },
         [] )
+
+
+  @IsolatedYcmd()
+  def test_LanguageServerCompleter_RefactorRenameWithoutPreparation(
+      self,
+      _app: object
+  ) -> None:
+    rename_providers: tuple[ object, ... ] = (
+      True,
+      {},
+      { 'prepareProvider': False },
+    )
+
+    for rename_provider in rename_providers:
+      with self.subTest( rename_provider = rename_provider ):
+        completer = MockCompleter()
+        completer._started = True
+        completer._initialize_event.set()
+        completer._server_capabilities = {
+          'renameProvider': rename_provider,
+        }
+        request_data: RequestWrap = _RenameRequestData()
+
+        with patch.object(
+            completer,
+            '_UpdateServerWithFileContents'
+        ):
+          with patch.object(
+              completer.GetConnection(),
+              'GetResponse',
+              return_value = {
+                'result': _RenameWorkspaceEdit( request_data )
+              }
+          ) as get_response:
+            assert_that(
+              completer.RefactorRename( request_data, [ 'bar' ] ),
+              has_key( 'fixits' )
+            )
+
+        assert_that(
+          _RequestedLspMethods( get_response ),
+          contains_exactly( 'textDocument/rename' )
+        )
+
+
+  @IsolatedYcmd()
+  def test_LanguageServerCompleter_RefactorRenameAcceptsPreparationResults(
+      self,
+      _app: object
+  ) -> None:
+    rename_range: dict[ str, object ] = {
+      'start': { 'line': 0, 'character': 0 },
+      'end': { 'line': 0, 'character': 3 },
+    }
+    prepare_results: tuple[ object, ... ] = (
+      rename_range,
+      {
+        'range': rename_range,
+        'placeholder': 'foo',
+      },
+      { 'defaultBehavior': True },
+    )
+
+    for prepare_result in prepare_results:
+      with self.subTest( prepare_result = prepare_result ):
+        completer = MockCompleter()
+        completer._started = True
+        completer._initialize_event.set()
+        completer._server_capabilities = {
+          'renameProvider': {
+            'prepareProvider': True,
+          },
+        }
+        request_data: RequestWrap = _RenameRequestData()
+
+        with patch.object(
+            completer,
+            '_UpdateServerWithFileContents'
+        ):
+          with patch.object(
+              completer.GetConnection(),
+              'GetResponse',
+              side_effect = [
+                { 'result': prepare_result },
+                { 'result': _RenameWorkspaceEdit( request_data ) },
+              ]
+          ) as get_response:
+            assert_that(
+              completer.RefactorRename( request_data, [ 'bar' ] ),
+              has_key( 'fixits' )
+            )
+
+        assert_that(
+          _RequestedLspMethods( get_response ),
+          contains_exactly(
+            'textDocument/prepareRename',
+            'textDocument/rename'
+          )
+        )
+        assert_that(
+          [
+            request.args[ 0 ]
+            for request in get_response.call_args_list
+          ],
+          contains_exactly( 1, 2 )
+        )
+
+
+  @IsolatedYcmd()
+  def test_LanguageServerCompleter_RefactorRenameRejectsNullPreparation(
+      self,
+      _app: object
+  ) -> None:
+    completer = MockCompleter()
+    completer._started = True
+    completer._initialize_event.set()
+    completer._server_capabilities = {
+      'renameProvider': {
+        'prepareProvider': True,
+      },
+    }
+    request_data: RequestWrap = _RenameRequestData()
+
+    with patch.object(
+        completer,
+        '_UpdateServerWithFileContents'
+    ):
+      with patch.object(
+          completer.GetConnection(),
+          'GetResponse',
+          return_value = { 'result': None }
+      ) as get_response:
+        assert_that(
+          calling( completer.RefactorRename ).with_args(
+            request_data,
+            [ 'bar' ]
+          ),
+          raises(
+            RuntimeError,
+            'Cannot rename the symbol under cursor.'
+          )
+        )
+
+    assert_that(
+      _RequestedLspMethods( get_response ),
+      contains_exactly( 'textDocument/prepareRename' )
+    )
+
+
+  @IsolatedYcmd()
+  def test_LanguageServerCompleter_RefactorRenameReportsPreparationError(
+      self,
+      _app: object
+  ) -> None:
+    completer = MockCompleter()
+    completer._started = True
+    completer._initialize_event.set()
+    completer._server_capabilities = {
+      'renameProvider': {
+        'prepareProvider': True,
+      },
+    }
+    request_data: RequestWrap = _RenameRequestData()
+    prepare_error = lsc.ResponseFailedException( {
+      'code': lsp.Errors.InvalidRequest.code,
+      'message': 'This symbol cannot be renamed',
+    } )
+
+    with patch.object(
+        completer,
+        '_UpdateServerWithFileContents'
+    ):
+      with patch.object(
+          completer.GetConnection(),
+          'GetResponse',
+          side_effect = prepare_error
+      ) as get_response:
+        assert_that(
+          calling( completer.RefactorRename ).with_args(
+            request_data,
+            [ 'bar' ]
+          ),
+          raises(
+            RuntimeError,
+            'This symbol cannot be renamed'
+          )
+        )
+
+    assert_that(
+      _RequestedLspMethods( get_response ),
+      contains_exactly( 'textDocument/prepareRename' )
+    )
 
 
   @IsolatedYcmd()

@@ -275,6 +275,58 @@ class LanguageServerProtocolTest( TestCase ):
     )
 
 
+  def test_Initialize_AdvertisesPrepareRename( self ) -> None:
+    message: bytes = lsp.Initialize( 1, '/project', {}, {}, [] )
+    payload: bytes = message.split( b'\r\n\r\n', 1 )[ 1 ]
+
+    assert_that(
+      lsp.Parse( payload ),
+      has_entries( {
+        'params': has_entries( {
+          'capabilities': has_entries( {
+            'textDocument': has_entries( {
+              'rename': {
+                'prepareSupport': True,
+                'prepareSupportDefaultBehavior': 1,
+              }
+            } )
+          } )
+        } )
+      } )
+    )
+
+
+  def test_PrepareRename_BuildsRequestWithUtf16Position( self ) -> None:
+    filepath: str = os.path.abspath( '/test.cpp' )
+    request_data: dict[ str, object ] = {
+      'filepath': filepath,
+      'line_num': 3,
+      'line_value': 'a😀b',
+      'column_codepoint': 3,
+    }
+
+    message: bytes = lsp.PrepareRename( 7, request_data )
+    payload: bytes = message.split( b'\r\n\r\n', 1 )[ 1 ]
+
+    assert_that(
+      lsp.Parse( payload ),
+      equal_to( {
+        'jsonrpc': '2.0',
+        'id': 7,
+        'method': 'textDocument/prepareRename',
+        'params': {
+          'textDocument': {
+            'uri': lsp.FilePathToUri( filepath ),
+          },
+          'position': {
+            'line': 2,
+            'character': 3,
+          },
+        },
+      } )
+    )
+
+
   def test_ServerFileStateStore_RetrieveDelete( self ):
     store = lsp.ServerFileStateStore()
 

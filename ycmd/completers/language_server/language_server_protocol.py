@@ -399,6 +399,10 @@ def Initialize( request_id,
           ],
         },
       },
+      'rename': {
+        'prepareSupport': True,
+        'prepareSupportDefaultBehavior': 1,
+      },
       'semanticTokens': {
         'requests': {
           'range': True,
@@ -623,6 +627,16 @@ def CodeAction( request_id, request_data, best_match_range, diagnostics ):
 
 def CodeActionResolve( request_id, code_action ):
   return BuildRequest( request_id, 'codeAction/resolve', code_action )
+
+
+def PrepareRename(
+    request_id: LspRequestId,
+    request_data: Any
+) -> bytes:
+  return BuildRequest(
+    request_id,
+    'textDocument/prepareRename',
+    BuildTextDocumentPositionParams( request_data ) )
 
 
 def Rename( request_id, request_data, new_name ):
