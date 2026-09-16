@@ -65,6 +65,83 @@ class LanguageServerProtocolTest( TestCase ):
       equal_to( lsp.WorkDoneProgressResult.INVALID ) )
 
 
+  def test_WorkDoneProgressTracker_CoalescesPendingUpdates( self ) -> None:
+    tracker = lsp.WorkDoneProgressTracker()
+    tracker.Create( 'index' )
+
+    tracker.Process( 'index', {
+      'kind': 'begin',
+      'title': 'Indexing',
+      'percentage': 0,
+    } )
+    tracker.Process( 'index', {
+      'kind': 'report',
+      'message': 'Checking files',
+    } )
+    tracker.Process( 'index', {
+      'kind': 'report',
+      'percentage': 50,
+    } )
+
+    assert_that(
+      tracker.TakePendingUpdates(),
+      equal_to( [ (
+        'index',
+        {
+          'kind': 'begin',
+          'title': 'Indexing',
+          'message': 'Checking files',
+          'percentage': 50,
+        }
+      ) ] )
+    )
+
+    tracker.Process( 'index', {
+      'kind': 'report',
+      'message': 'Finishing',
+    } )
+    tracker.Process( 'index', {
+      'kind': 'report',
+      'percentage': 90,
+    } )
+
+    assert_that(
+      tracker.TakePendingUpdates(),
+      equal_to( [ (
+        'index',
+        {
+          'kind': 'report',
+          'message': 'Finishing',
+          'percentage': 90,
+        }
+      ) ] )
+    )
+
+    tracker.Process( 'index', { 'kind': 'end', 'message': 'Done' } )
+    assert_that(
+      tracker.TakePendingUpdates(),
+      equal_to( [ (
+        'index',
+        { 'kind': 'end', 'message': 'Done' }
+      ) ] )
+    )
+    assert_that( tracker.TakePendingUpdates(), equal_to( [] ) )
+
+
+  def test_WorkDoneProgressTracker_DropsUndeliveredCompletedOperation(
+      self
+  ) -> None:
+    tracker = lsp.WorkDoneProgressTracker()
+    tracker.Create( 'index' )
+    tracker.Process( 'index', {
+      'kind': 'begin',
+      'title': 'Indexing',
+    } )
+    tracker.Process( 'index', { 'kind': 'end' } )
+
+    assert_that( tracker.TakePendingUpdates(), equal_to( [] ) )
+
+
   def test_WorkDoneProgressTracker_RejectsInvalidOrDuplicateToken( self ):
     tracker = lsp.WorkDoneProgressTracker()
 

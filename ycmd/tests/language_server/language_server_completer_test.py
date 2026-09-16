@@ -812,9 +812,10 @@ class LanguageServerCompleterTest( TestCase ):
 
 
   @IsolatedYcmd()
-  def test_LanguageServerCompleter_WorkDoneProgress( self, app ):
+  def test_LanguageServerCompleter_WorkDoneProgress(
+      self, app: object
+  ) -> None:
     completer = MockCompleter()
-    request_data = RequestWrap( BuildRequest() )
     connection = MockConnection( connection_generation = 7 )
     completer._connection = connection
     create_request = {
@@ -838,14 +839,14 @@ class LanguageServerCompleterTest( TestCase ):
     with patch.object( connection, 'SendResponse' ):
       connection._ServerToClientRequest( create_request )
     connection._DispatchMessage( notification )
-    notification = connection._notifications.get_nowait()
 
-    # Conversion must use the generation of the connection that received the
-    # progress, even if the completer now points at a replacement connection.
+    # Delivery must use the generation of the connection that received the
+    # progress even if the completer now points at a replacement connection.
     completer._connection = MockConnection( connection_generation = 8 )
 
-    message = completer.ConvertNotificationToMessage( request_data,
-                                                       notification )
+    messages = completer._TakePendingWorkDoneProgressMessages( connection )
+    assert_that( len( messages ), equal_to( 1 ) )
+    message = messages[ 0 ]
     assert message is not None
     progress = message.get( 'work_done_progress' )
     assert isinstance( progress, dict )
@@ -858,6 +859,73 @@ class LanguageServerCompleterTest( TestCase ):
       'title': 'Indexing',
       'percentage': 10,
     } ) )
+
+
+  @IsolatedYcmd()
+  @patch.object( lsc, 'MAX_QUEUED_MESSAGES', 2 )
+  def test_LanguageServerCompleter_DeliversWorkDoneProgressEndAfterOverflow(
+      self,
+      app: object
+  ) -> None:
+    completer = MockCompleter()
+    completer._initialize_event.set()
+    request_data = RequestWrap( BuildRequest() )
+    connection = MockConnection( connection_generation = 7 )
+    completer._connection = connection
+    create_request = {
+      'jsonrpc': '2.0',
+      'id': 1,
+      'method': 'window/workDoneProgress/create',
+      'params': { 'token': 'test-token' },
+    }
+
+    def Progress( kind: str, **kwargs: object ) -> dict[ str, object ]:
+      value: dict[ str, object ] = { 'kind': kind }
+      value.update( kwargs )
+      return {
+        'jsonrpc': '2.0',
+        'method': '$/progress',
+        'params': {
+          'token': 'test-token',
+          'value': value,
+        },
+      }
+
+    with patch.object( connection, 'SendResponse' ):
+      connection._ServerToClientRequest( create_request )
+
+    connection._DispatchMessage(
+      Progress( 'begin', title = 'Building CrateGraph' )
+    )
+    assert_that(
+      completer.PollForMessagesInner( request_data, 0 ),
+      contains_exactly( has_entries( {
+        'work_done_progress': has_entries( {
+          'kind': 'begin',
+          'token': 'test-token',
+        } )
+      } ) )
+    )
+
+    connection._DispatchMessage( Progress( 'end' ) )
+    connection._DispatchMessage( {
+      'method': 'window/showMessage',
+      'params': { 'message': 'first' },
+    } )
+    connection._DispatchMessage( {
+      'method': 'window/showMessage',
+      'params': { 'message': 'second' },
+    } )
+
+    assert_that(
+      completer.PollForMessagesInner( request_data, 0 ),
+      has_items( has_entries( {
+        'work_done_progress': has_entries( {
+          'kind': 'end',
+          'token': 'test-token',
+        } )
+      } ) )
+    )
 
 
   @IsolatedYcmd()

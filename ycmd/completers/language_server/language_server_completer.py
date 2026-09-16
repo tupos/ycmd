@@ -2267,6 +2267,24 @@ class LanguageServerCompleter( Completer ):
           diagnostics, filepath, self.max_diagnostics_to_display )
 
 
+  def _TakePendingWorkDoneProgressMessages(
+      self,
+      connection: LanguageServerConnection
+  ) -> list[ dict[ str, object ] ]:
+    messages: list[ dict[ str, object ] ] = []
+    for token, value in (
+        connection._work_done_progress.TakePendingUpdates() ):
+      progress = value.copy()
+      progress.update( {
+        'server': self.GetServerName(),
+        'connection_generation': connection._connection_generation,
+        'token': token,
+      } )
+      messages.append( { 'work_done_progress': progress } )
+
+    return messages
+
+
   def PollForMessagesInner( self, request_data, timeout ):
     # If there are messages pending in the queue, return them immediately
     messages = self._GetPendingMessages( request_data )
@@ -2277,7 +2295,10 @@ class LanguageServerCompleter( Completer ):
     return self._AwaitServerMessages( request_data, timeout )
 
 
-  def _GetPendingMessages( self, request_data ):
+  def _GetPendingMessages(
+      self,
+      request_data: RequestWrap
+  ) -> list[ dict[ str, object ] ] | bool:
     """Convert any pending notifications to messages and return them in a list.
     If there are no messages pending, returns an empty list. Returns False if an
     error occurred and no further polling should be attempted."""
@@ -2289,12 +2310,13 @@ class LanguageServerCompleter( Completer ):
       return messages
 
     try:
-      while True:
-        if not self.GetConnection():
-          # The server isn't running or something. Don't re-poll.
-          return False
+      connection = self.GetConnection()
+      if not connection:
+        # The server isn't running or something. Don't re-poll.
+        return False
 
-        notification = self.GetConnection()._notifications.get_nowait()
+      while True:
+        notification = connection._notifications.get_nowait()
         message = self.ConvertNotificationToMessage( request_data,
                                                      notification )
 
@@ -2304,13 +2326,20 @@ class LanguageServerCompleter( Completer ):
       # We drained the queue
       pass
 
-    return messages
+    return (
+      self._TakePendingWorkDoneProgressMessages( connection ) +
+      messages
+    )
 
 
-  def _AwaitServerMessages( self, request_data, timeout ):
+  def _AwaitServerMessages(
+      self,
+      request_data: RequestWrap,
+      timeout: float
+  ) -> list[ dict[ str, object ] ] | bool:
     """Block until either we receive a notification, or a timeout occurs.
     Returns one of the following:
-       - a list containing a single message
+       - a list containing one or more messages
        - True if a timeout occurred, and the poll should be restarted
        - False if an error occurred, and no further polling should be attempted
     """
@@ -2328,17 +2357,20 @@ class LanguageServerCompleter( Completer ):
           # poll.
           return not self._server_started or self._initialize_event.is_set()
 
-        if not self.GetConnection():
+        connection = self.GetConnection()
+        if not connection:
           # The server isn't running or something. Don't re-poll, as this will
           # just cause errors.
           return False
 
-        notification = self.GetConnection()._notifications.get(
-          timeout = timeout )
+        notification = connection._notifications.get( timeout = timeout )
         message = self.ConvertNotificationToMessage( request_data,
                                                      notification )
+        messages = self._TakePendingWorkDoneProgressMessages( connection )
         if message:
-          return [ message ]
+          messages.append( message )
+        if messages:
+          return messages
     except queue.Empty:
       return True
 
@@ -2376,7 +2408,11 @@ class LanguageServerCompleter( Completer ):
         self._latest_diagnostics[ uri ] = params[ 'diagnostics' ]
 
 
-  def ConvertNotificationToMessage( self, request_data, notification ):
+  def ConvertNotificationToMessage(
+      self,
+      request_data: RequestWrap,
+      notification: dict[ str, object ]
+  ) -> dict[ str, object ] | None:
     """Convert the supplied server notification to a ycmd message. Returns None
     if the notification should be ignored.
 
@@ -2398,17 +2434,9 @@ class LanguageServerCompleter( Completer ):
 
     if ( notification[ 'method' ] == '$/progress' and
          notification.get( WORK_DONE_PROGRESS ) ):
-      params = notification.get( 'params' )
-      token = params.get( 'token' )
-      value = params.get( 'value' )
-      progress = value.copy()
-      progress.update( {
-        'server': self.GetServerName(),
-        'connection_generation': notification[
-          WORK_DONE_PROGRESS_CONNECTION_GENERATION ],
-        'token': token,
-      } )
-      return { 'work_done_progress': progress }
+      # The queued notification only wakes the message poll. The coalesced
+      # update is delivered by _TakePendingWorkDoneProgressMessages.
+      return None
 
     if notification[ 'method' ] == 'textDocument/publishDiagnostics':
       params = notification[ 'params' ]

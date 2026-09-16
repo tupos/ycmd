@@ -918,11 +918,18 @@ class _WorkDoneProgressState( enum.Enum ):
   FINISHED = enum.auto()  # End received; token remains reserved against reuse.
 
 
+class _TrackedWorkDoneProgress:
+  def __init__( self ) -> None:
+    self.state: _WorkDoneProgressState = _WorkDoneProgressState.CREATED
+    self.pending_update: dict[ str, object ] | None = None
+    self.reported_to_client: bool = False
+
+
 class WorkDoneProgressTracker:
   """Tracks server-created work-done progress for one LSP connection."""
 
   def __init__( self ) -> None:
-    self._tokens: dict[ ProgressToken, _WorkDoneProgressState ] = {}
+    self._tokens: dict[ ProgressToken, _TrackedWorkDoneProgress ] = {}
     self._mutex: threading.Lock = threading.Lock()
 
 
@@ -934,7 +941,7 @@ class WorkDoneProgressTracker:
     with self._mutex:
       if token in self._tokens:
         return False
-      self._tokens[ token ] = _WorkDoneProgressState.CREATED
+      self._tokens[ token ] = _TrackedWorkDoneProgress()
     return True
 
 
@@ -950,8 +957,8 @@ class WorkDoneProgressTracker:
       return WorkDoneProgressResult.UNTRACKED
 
     with self._mutex:
-      state = self._tokens.get( token )
-      if state is None:
+      tracked_progress = self._tokens.get( token )
+      if tracked_progress is None:
         return WorkDoneProgressResult.UNTRACKED
 
       if not isinstance( value, dict ):
@@ -959,23 +966,74 @@ class WorkDoneProgressTracker:
 
       match value.get( 'kind' ):
         case 'begin':
-          if ( state is not _WorkDoneProgressState.CREATED or
+          if ( tracked_progress.state is not
+               _WorkDoneProgressState.CREATED or
                not self._ValidateBegin( value ) ):
             return WorkDoneProgressResult.INVALID
-          self._tokens[ token ] = _WorkDoneProgressState.ACTIVE
+          tracked_progress.state = _WorkDoneProgressState.ACTIVE
+          tracked_progress.pending_update = value.copy()
         case 'report':
-          if ( state is not _WorkDoneProgressState.ACTIVE or
+          if ( tracked_progress.state is not
+               _WorkDoneProgressState.ACTIVE or
                not self._ValidateReport( value ) ):
             return WorkDoneProgressResult.INVALID
+          self._StorePendingReport( tracked_progress, value )
         case 'end':
-          if ( state is not _WorkDoneProgressState.ACTIVE or
+          if ( tracked_progress.state is not
+               _WorkDoneProgressState.ACTIVE or
                not self._ValidateEnd( value ) ):
             return WorkDoneProgressResult.INVALID
-          self._tokens[ token ] = _WorkDoneProgressState.FINISHED
+          tracked_progress.state = _WorkDoneProgressState.FINISHED
+          if tracked_progress.reported_to_client:
+            tracked_progress.pending_update = value.copy()
+          else:
+            # If begin has not left ycmd, the client never saw this short-lived
+            # operation and therefore does not need its end notification.
+            tracked_progress.pending_update = None
         case _:
           return WorkDoneProgressResult.INVALID
 
     return WorkDoneProgressResult.ACCEPTED
+
+
+  @staticmethod
+  def _StorePendingReport(
+      tracked_progress: _TrackedWorkDoneProgress,
+      report: dict[ str, object ]
+  ) -> None:
+    pending_update = tracked_progress.pending_update
+    if pending_update is None:
+      tracked_progress.pending_update = report.copy()
+      return
+
+    # Preserve begin when it has not been delivered yet, and combine multiple
+    # reports into the latest state. Missing report fields mean unchanged.
+    for field in ( 'cancellable', 'message', 'percentage' ):
+      if field in report:
+        pending_update[ field ] = report[ field ]
+
+
+  def TakePendingUpdates(
+      self
+  ) -> list[ tuple[ ProgressToken, dict[ str, object ] ] ]:
+    """Return and clear the progress updates pending for the client."""
+    updates: list[ tuple[ ProgressToken, dict[ str, object ] ] ] = []
+    with self._mutex:
+      for token, tracked_progress in self._tokens.items():
+        update = tracked_progress.pending_update
+        if update is None:
+          continue
+
+        kind = update[ 'kind' ]
+        if kind == 'begin':
+          tracked_progress.reported_to_client = True
+        elif kind == 'end':
+          tracked_progress.reported_to_client = False
+
+        updates.append( ( token, update ) )
+        tracked_progress.pending_update = None
+
+    return updates
 
 
   @staticmethod
