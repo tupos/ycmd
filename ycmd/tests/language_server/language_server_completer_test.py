@@ -16,7 +16,7 @@
 # along with ycmd.  If not, see <http://www.gnu.org/licenses/>.
 
 from collections.abc import Callable
-from unittest.mock import patch
+from unittest.mock import Mock, call, patch
 from unittest import TestCase
 from hamcrest import ( all_of,
                        assert_that,
@@ -1729,6 +1729,50 @@ class LanguageServerCompleterTest( TestCase ):
                          'SendNotification' ) as send_notification:
         completer.OnFileSave( request_data )
         send_notification.assert_not_called()
+
+
+  @IsolatedYcmd()
+  def test_LanguageServerCompleter_OnFileSave_UpdatesContentsBeforeSave(
+      self,
+      _app: object
+  ) -> None:
+    completer = MockCompleter()
+    completer._started = True
+    completer._initialize_event.set()
+    completer._server_capabilities = {
+      'textDocumentSync': {
+        'save': {
+          'includeText': True,
+        },
+      },
+    }
+    filepath: str = os.path.realpath( '/foo' )
+    old_contents: str = 'old contents'
+    new_contents: str = 'new contents'
+    file_state: lsp.ServerFileState = completer._server_file_state[ filepath ]
+    file_state.GetDirtyFileAction( old_contents )
+    request_data = RequestWrap(
+      BuildRequest(
+        filepath = filepath,
+        contents = new_contents,
+        filetype = 'foo'
+      )
+    )
+
+    send_notification: Mock
+    with patch.object(
+        completer.GetConnection(),
+        'SendNotification'
+    ) as send_notification:
+      completer.OnFileSave( request_data )
+
+    assert_that(
+      send_notification.call_args_list,
+      contains_exactly(
+        call( lsp.DidChangeTextDocument( file_state, new_contents ) ),
+        call( lsp.DidSaveTextDocument( file_state, new_contents ) )
+      )
+    )
 
 
   @IsolatedYcmd()

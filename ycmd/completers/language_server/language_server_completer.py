@@ -2603,21 +2603,41 @@ class LanguageServerCompleter( Completer ):
       self._PurgeFileFromServer( file_name )
 
 
-  def OnFileSave( self, request_data ):
+  def OnFileSave( self, request_data: RequestWrap ) -> None:
     if not self.ServerIsReady():
       return
 
-    sync = self._server_capabilities.get( 'textDocumentSync' )
-    if sync is not None:
-      if isinstance( sync, dict ) and _IsCapabilityProvided( sync, 'save' ):
-        save = sync[ 'save' ]
-        file_name = request_data[ 'filepath' ]
-        contents = None
-        if isinstance( save, dict ) and save.get( 'includeText' ):
-          contents = request_data[ 'file_data' ][ file_name ][ 'contents' ]
-        file_state = self._server_file_state[ file_name ]
-        msg = lsp.DidSaveTextDocument( file_state, contents )
-        self.GetConnection().SendNotification( msg )
+    file_name: str = request_data[ 'filepath' ]
+    contents: str = GetFileContents( request_data, file_name )
+    file_types: list[ str ] = request_data[ 'filetypes' ]
+
+    with self._server_info_mutex:
+      # A save may arrive before a pending FileReadyToParse request. Ensure that
+      # the language server sees the current contents before the save.
+      self._RefreshFileContentsUnderLock(
+        file_name,
+        contents,
+        file_types
+      )
+
+      sync: object = self._server_capabilities.get( 'textDocumentSync' )
+      if not isinstance( sync, dict ):
+        return
+      if not _IsCapabilityProvided( sync, 'save' ):
+        return
+
+      save_capability: object = sync[ 'save' ]
+      saved_contents: str | None = None
+      if ( isinstance( save_capability, dict ) and
+           save_capability.get( 'includeText' ) ):
+        saved_contents = contents
+
+      file_state: lsp.ServerFileState = self._server_file_state[ file_name ]
+      message: bytes = lsp.DidSaveTextDocument(
+        file_state,
+        saved_contents
+      )
+      self.GetConnection().SendNotification( message )
 
 
   def OnBufferUnload( self, request_data ):
