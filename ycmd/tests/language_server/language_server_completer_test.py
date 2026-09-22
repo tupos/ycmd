@@ -1848,7 +1848,137 @@ class LanguageServerCompleterTest( TestCase ):
         completer,
         completer.ComputeSemanticTokens,
         { 'result': { 'data': [] } },
-        { 'tokens': [] } )
+        {
+          'tokens': [],
+          'covered_range': {
+            'start': {
+              'line_num': 1,
+              'column_num': 1,
+              'filepath': '/foo',
+            },
+            'end': {
+              'line_num': 1,
+              'column_num': 1,
+              'filepath': '/foo',
+            },
+          },
+        } )
+
+
+  @IsolatedYcmd()
+  def test_LanguageServerCompleter_ComputeSemanticTokens_ReportsRequestedRange(
+      self,
+      _app: object
+  ) -> None:
+    completer = MockCompleter()
+    completer._started = True
+    completer._initialize_event.set()
+    completer._server_capabilities = {
+      'semanticTokensProvider': {
+        'range': True
+      }
+    }
+    completer._semantic_token_atlas = lsc.TokenAtlas( {
+      'tokenTypes': [],
+      'tokenModifiers': []
+    } )
+    requested_range: dict[ str, dict[ str, object ] ] = {
+      'start': {
+        'line_num': 10,
+        'column_num': 1,
+        'filepath': '/foo',
+      },
+      'end': {
+        'line_num': 20,
+        'column_num': 4,
+        'filepath': '/foo',
+      },
+    }
+    request_data = RequestWrap(
+      BuildRequest(
+        contents = '\n'.join( f'line { line }' for line in range( 1, 21 ) ),
+        range = requested_range
+      )
+    )
+
+    with patch.object(
+        completer,
+        '_UpdateServerWithCurrentFileContents'
+    ):
+      with patch.object(
+          completer.GetConnection(),
+          'GetResponse',
+          return_value = { 'result': { 'data': [] } }
+      ):
+        assert_that(
+          completer.ComputeSemanticTokens( request_data ),
+          equal_to( {
+            'tokens': [],
+            'covered_range': requested_range,
+          } )
+        )
+
+
+  @IsolatedYcmd()
+  def test_LanguageServerCompleter_ComputeSemanticTokens_ReportsFullRange(
+      self,
+      _app: object
+  ) -> None:
+    completer = MockCompleter()
+    completer._started = True
+    completer._initialize_event.set()
+    completer._server_capabilities = {
+      'semanticTokensProvider': {
+        'full': True
+      }
+    }
+    completer._semantic_token_atlas = lsc.TokenAtlas( {
+      'tokenTypes': [],
+      'tokenModifiers': []
+    } )
+    request_data = RequestWrap(
+      BuildRequest(
+        contents = 'first\nføo',
+        range = {
+          'start': {
+            'line_num': 1,
+            'column_num': 1,
+          },
+          'end': {
+            'line_num': 1,
+            'column_num': 3,
+          },
+        }
+      )
+    )
+
+    with patch.object(
+        completer,
+        '_UpdateServerWithCurrentFileContents'
+    ):
+      with patch.object(
+          completer.GetConnection(),
+          'GetResponse',
+          return_value = { 'result': { 'data': [] } }
+      ):
+        assert_that(
+          completer.ComputeSemanticTokens( request_data ),
+          equal_to( {
+            'tokens': [],
+            'covered_range': {
+              'start': {
+                'line_num': 1,
+                'column_num': 1,
+                'filepath': '/foo',
+              },
+              'end': {
+                'line_num': 2,
+                'column_num': 5,
+                'filepath': '/foo',
+              },
+            },
+          } )
+        )
 
 
   @IsolatedYcmd()

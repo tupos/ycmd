@@ -1772,9 +1772,12 @@ class LanguageServerCompleter( Completer ):
     if not self._semantic_token_atlas:
       return {}
 
-    range_supported = _IsCapabilityProvided(
+    range_requested: bool = (
+      'range' in request_data and
+      _IsCapabilityProvided(
         self._server_capabilities[ 'semanticTokensProvider' ],
         'range' )
+    )
 
     self._UpdateServerWithCurrentFileContents( request_data )
 
@@ -1783,7 +1786,7 @@ class LanguageServerCompleter( Completer ):
     ) -> bytes:
       return lsp.SemanticTokens(
         request_id,
-        range_supported,
+        range_requested,
         request_data
       )
 
@@ -1806,8 +1809,17 @@ class LanguageServerCompleter( Completer ):
                                     filename,
                                     contents )
 
+    covered_range: dict[ str, dict[ str, object ] ] = (
+      _SemanticTokensCoveredRange(
+        request_data,
+        range_requested,
+        filename,
+        contents
+      )
+    )
     return {
-      'tokens': tokens
+      'tokens': tokens,
+      'covered_range': covered_range,
     }
 
 
@@ -4088,6 +4100,35 @@ class TokenAtlas:
   def __init__( self, legend ):
     self.tokenTypes = legend[ 'tokenTypes' ]
     self.tokenModifiers = legend[ 'tokenModifiers' ]
+
+
+def _SemanticTokensCoveredRange(
+    request_data: RequestWrap,
+    range_requested: bool,
+    filename: str,
+    contents: list[ str ]
+) -> dict[ str, dict[ str, object ] ]:
+  if range_requested:
+    return request_data[ 'range' ]
+
+  last_line_number: int = len( contents ) if contents else 1
+  last_line_value: str = contents[ -1 ] if contents else ''
+  end_column: int = utils.CodepointOffsetToByteOffset(
+    last_line_value,
+    len( last_line_value ) + 1
+  )
+  return {
+    'start': {
+      'line_num': 1,
+      'column_num': 1,
+      'filepath': filename,
+    },
+    'end': {
+      'line_num': last_line_number,
+      'column_num': end_column,
+      'filepath': filename,
+    },
+  }
 
 
 def _DecodeSemanticTokens( atlas, token_data, filename, contents ):
