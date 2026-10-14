@@ -86,6 +86,33 @@ class MiscHandlersTest( TestCase ):
     assert_that( completer.cancellation_requested, equal_to( True ) )
 
 
+  @IsolatedYcmd()
+  def test_MiscHandlers_SetLanguageServerState(
+      self,
+      app: object
+  ) -> None:
+    expected_response: dict[ str, object ] = {
+      'enabled': False,
+      'filetypes': [ 'rust' ],
+      'work_done_progress_cleanups': [],
+    }
+    with patch.object(
+        handlers._server_state,
+        'SetLanguageServerEnabled',
+        return_value = expected_response
+    ) as set_language_server_enabled:
+      response = app.post_json(
+        '/set_language_server_state',
+        {
+          'enabled': False,
+          'filetype': 'rust',
+        }
+      )
+
+    assert_that( response.json, equal_to( expected_response ) )
+    set_language_server_enabled.assert_called_once_with( False, 'rust' )
+
+
   @SharedYcmd
   def test_MiscHandlers_Healthy( self, app ):
     assert_that( app.get( '/healthy' ).json, equal_to( True ) )

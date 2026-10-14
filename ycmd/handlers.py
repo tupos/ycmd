@@ -178,6 +178,29 @@ def EventNotification( request, response ):
   return _JsonResponse( {}, response )
 
 
+@app.post( '/set_language_server_state' )
+def SetLanguageServerState(
+    request: ycmd.web_plumbing.Request,
+    response: ycmd.web_plumbing.Response
+) -> str:
+  request_data = RequestWrap( request.json, validate = False )
+  enabled = request_data.get( 'enabled' )
+  if not isinstance( enabled, bool ):
+    raise ServerError( "'enabled' must be a boolean" )
+
+  filetype = request_data.get( 'filetype' )
+  if filetype is not None and not isinstance( filetype, str ):
+    raise ServerError( "'filetype' must be a string" )
+
+  return _JsonResponse(
+    _server_state.SetLanguageServerEnabled(
+      enabled,
+      filetype if filetype else None
+    ),
+    response
+  )
+
+
 @app.get( '/signature_help_available' )
 def GetSignatureHelpAvailable( request, response ):
   if request.query.subserver:

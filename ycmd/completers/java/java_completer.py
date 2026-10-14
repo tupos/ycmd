@@ -26,6 +26,7 @@ from collections import OrderedDict
 
 from ycmd import responses, utils
 from ycmd.completers.language_server import language_server_completer
+from ycmd.request_wrap import RequestWrap
 from ycmd.utils import LOGGER
 
 NO_DOCUMENTATION_MESSAGE = 'No documentation available for current context'
@@ -446,12 +447,15 @@ class JavaCompleter( language_server_completer.LanguageServerCompleter ):
 
 
   def StartServer( self,
-                   request_data,
-                   project_directory = None,
-                   wipe_workspace = False,
-                   wipe_config = False ):
+                   request_data: RequestWrap,
+                   project_directory: str | None = None,
+                   wipe_workspace: bool = False,
+                   wipe_config: bool = False ) -> bool:
     try:
       with self._server_info_mutex:
+        if self._ServerStartDisabledNoLock():
+          return False
+
         LOGGER.info( 'Starting jdt.ls Language Server...' )
 
         if project_directory:

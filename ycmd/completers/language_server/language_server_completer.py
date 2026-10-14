@@ -1167,6 +1167,7 @@ class LanguageServerCompleter( Completer ):
     self._server_keep_logfiles = user_options[ 'server_keep_logfiles' ]
     self._stdout_file = None
     self._stderr_file = None
+    self._server_disabled: bool = False
     self._server_started = False
 
     self._Reset()
@@ -1214,9 +1215,20 @@ class LanguageServerCompleter( Completer ):
     return self._language
 
 
-  def StartServer( self, request_data ):
+  def _ServerStartDisabledNoLock( self ) -> bool:
+    if not self._server_disabled:
+      return False
+
+    LOGGER.info( 'Not starting disabled server %s', self.GetServerName() )
+    return True
+
+
+  def StartServer( self, request_data: RequestWrap ) -> bool:
     try:
       with self._server_info_mutex:
+        if self._ServerStartDisabledNoLock():
+          return False
+
         return self._StartServerNoLock( request_data )
     except LanguageServerConnectionTimeout:
       LOGGER.error( '%s failed to start, or did not connect successfully',
@@ -1420,7 +1432,35 @@ class LanguageServerCompleter( Completer ):
       self._initialize_event.set()
 
 
-  def _RestartServer( self, request_data, *args, **kwargs ):
+  def ServerIsDisabled( self ) -> bool:
+    with self._server_info_mutex:
+      return self._server_disabled
+
+
+  def DisableServer( self ) -> dict[ str, object ] | None:
+    with self._server_info_mutex:
+      self._server_disabled = True
+
+    LOGGER.info( 'Disabling %s', self.GetServerName() )
+    return self._StopServer()
+
+
+  def EnableServer( self ) -> None:
+    with self._server_info_mutex:
+      self._server_disabled = False
+      if not self.ServerIsHealthy():
+        self._server_started = False
+
+    LOGGER.info( 'Enabling %s', self.GetServerName() )
+
+
+  def _RestartServer(
+      self,
+      request_data: RequestWrap,
+      *args: object,
+      **kwargs: object
+  ) -> None:
+    self.EnableServer()
     self.Shutdown()
     self._StartAndInitializeServer( request_data, *args, **kwargs )
     self._OnInitializeComplete(
@@ -2225,7 +2265,13 @@ class LanguageServerCompleter( Completer ):
       self._SendInitialize( request_data )
 
 
-  def OnFileReadyToParse( self, request_data ):
+  def OnFileReadyToParse(
+      self,
+      request_data: RequestWrap
+  ) -> list[ dict[ str, object ] ] | None:
+    if self.ServerIsDisabled():
+      return []
+
     if not self.ServerIsHealthy() and not self._server_started:
       # We have to get the settings before starting the server, as this call
       # might throw UnknownExtraConf.

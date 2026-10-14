@@ -47,6 +47,7 @@ from ycmd.tests.test_utils import ( BuildRequest,
                                     DummyCompleter,
                                     LocationMatcher,
                                     RangeMatcher )
+from ycmd import server_state
 from ycmd.tests.language_server import IsolatedYcmd, PathToTestFile
 from ycmd import handlers, utils, responses
 import os
@@ -1016,6 +1017,93 @@ class LanguageServerCompleterTest( TestCase ):
         'connection_generation': 7,
       }
     } ) )
+
+
+  @IsolatedYcmd()
+  def test_LanguageServerCompleter_DisablePreventsAutomaticStart(
+      self,
+      app: object
+  ) -> None:
+    completer = MockCompleter()
+    request_data = RequestWrap( BuildRequest() )
+
+    with patch.object( completer, 'Shutdown' ) as shutdown:
+      response = completer.DisableServer()
+
+    assert_that( response, equal_to( None ) )
+    assert_that( completer.ServerIsDisabled(), equal_to( True ) )
+    shutdown.assert_called_once_with()
+
+    with patch.object(
+        completer,
+        '_StartAndInitializeServer'
+    ) as start_server:
+      assert_that( completer.OnFileReadyToParse( request_data ), empty() )
+
+    start_server.assert_not_called()
+
+
+  @IsolatedYcmd()
+  def test_LanguageServerCompleter_EnableAllowsAutomaticStart(
+      self,
+      app: object
+  ) -> None:
+    completer = MockCompleter()
+    completer._server_disabled = True
+    completer._server_started = True
+
+    completer.EnableServer()
+
+    assert_that( completer.ServerIsDisabled(), equal_to( False ) )
+    assert_that( completer._server_started, equal_to( False ) )
+
+
+  @IsolatedYcmd()
+  def test_ServerState_GlobalAndPerServerLanguageServerState(
+      self,
+      app: object
+  ) -> None:
+    state = server_state.ServerState(
+      handlers._server_state.user_options
+    )
+    completer = MockCompleter()
+
+    state.SetLanguageServerEnabled( False )
+
+    with patch(
+        'ycmd.server_state._GetGenericLSPCompleter',
+        return_value = completer
+    ):
+      loaded_completer = state.GetFiletypeCompleter( [ 'foo' ] )
+
+    assert_that( loaded_completer, equal_to( completer ) )
+    assert_that( completer.ServerIsDisabled(), equal_to( True ) )
+    assert_that(
+      state.FiletypeCompletionUsable( [ 'foo' ] ),
+      equal_to( False )
+    )
+
+    enable_response = state.SetLanguageServerEnabled( True, 'foo' )
+
+    assert_that( completer.ServerIsDisabled(), equal_to( False ) )
+    assert_that(
+      state.FiletypeCompletionUsable( [ 'foo' ] ),
+      equal_to( True )
+    )
+    assert_that(
+      enable_response,
+      has_entries( {
+        'enabled': True,
+        'filetypes': contains_exactly( 'foo' ),
+        'work_done_progress_cleanups': empty(),
+      } )
+    )
+
+    state.SetLanguageServerEnabled( False )
+    assert_that( completer.ServerIsDisabled(), equal_to( True ) )
+
+    state.SetLanguageServerEnabled( True )
+    assert_that( completer.ServerIsDisabled(), equal_to( False ) )
 
 
   @IsolatedYcmd()
