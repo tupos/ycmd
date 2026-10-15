@@ -384,6 +384,18 @@ class Completer( metaclass = abc.ABCMeta ):
     return []
 
 
+  def PrepareRename(
+      self,
+      request_data: object
+  ) -> dict[ str, object ]:
+    if 'RefactorRename' not in self.DefinedSubcommands():
+      raise RuntimeError( 'Cannot rename the symbol under cursor.' )
+
+    return {
+      'default_behavior': True,
+    }
+
+
   def DefinedSubcommands( self ):
     subcommands = sorted( self.GetSubcommandsMap().keys() )
     try:

@@ -76,3 +76,28 @@ class CompleterTest( TestCase ):
   def test_DefinedSubcommands_RemoveStopServerSubcommand( self, *args ):
     completer = DummyCompleter( DefaultOptions() )
     assert_that( completer.DefinedSubcommands(), contains_exactly( 'Foo' ) )
+
+
+  @patch(
+    'ycmd.tests.test_utils.DummyCompleter.GetSubcommandsMap',
+    return_value = { 'RefactorRename': '' }
+  )
+  def test_PrepareRename_UsesDefaultBehavior( self, *args ):
+    completer = DummyCompleter( DefaultOptions() )
+
+    assert_that(
+      completer.PrepareRename( {} ),
+      equal_to( {
+        'default_behavior': True,
+      } )
+    )
+
+
+  def test_PrepareRename_RejectsUnsupportedCompleter( self ):
+    completer = DummyCompleter( DefaultOptions() )
+
+    with self.assertRaisesRegex(
+        RuntimeError,
+        'Cannot rename the symbol under cursor.'
+    ):
+      completer.PrepareRename( {} )

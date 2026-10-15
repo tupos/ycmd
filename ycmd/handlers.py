@@ -231,6 +231,18 @@ def RunCompleterCommand(
       request_data ), response )
 
 
+@app.post( '/prepare_rename' )
+@_CancellableRequest
+def PrepareRename(
+    request: ycmd.web_plumbing.Request,
+    response: ycmd.web_plumbing.Response,
+    request_data: RequestWrap
+) -> str:
+  completer = _GetCompleterForRequestData( request_data )
+
+  return _JsonResponse( completer.PrepareRename( request_data ), response )
+
+
 @app.post( '/resolve_fixit' )
 @_CancellableRequest
 def ResolveFixit(

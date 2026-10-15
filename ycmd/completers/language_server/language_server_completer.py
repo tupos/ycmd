@@ -3346,6 +3346,82 @@ class LanguageServerCompleter( Completer ):
                                       kind )
 
 
+  def PrepareRename(
+      self,
+      request_data: RequestWrap
+  ) -> dict[ str, object ]:
+    if not self.ServerIsReady():
+      raise RuntimeError( 'Server is initializing. Please wait.' )
+
+    server_capabilities: dict[ str, object ] = (
+      self._server_capabilities or {}
+    )
+    if not _IsCapabilityProvided(
+        server_capabilities,
+        'renameProvider'
+    ):
+      raise RuntimeError( 'Cannot rename the symbol under cursor.' )
+
+    self._UpdateServerWithFileContents( request_data )
+
+    rename_provider: object = server_capabilities[ 'renameProvider' ]
+    if ( not isinstance( rename_provider, dict ) or
+         not rename_provider.get( 'prepareProvider' ) ):
+      return super().PrepareRename( request_data )
+
+    connection: LanguageServerConnection = self.GetConnection()
+    request_id: int = connection.NextRequestId()
+    try:
+      response: dict[ str, object ] = connection.GetResponse(
+        request_id,
+        lsp.PrepareRename( request_id, request_data ),
+        REQUEST_TIMEOUT_COMMAND,
+        cancellation_context = request_data.cancellation_context
+      )
+    except ResponseFailedException as exception:
+      raise RuntimeError( exception.error_message ) from exception
+
+    result: object = response.get( 'result' )
+    if not isinstance( result, dict ):
+      raise RuntimeError( 'Cannot rename the symbol under cursor.' )
+
+    if result.get( 'defaultBehavior' ) is True:
+      return {
+        'default_behavior': True,
+      }
+
+    lsp_range: object
+    placeholder: object | None = None
+    if 'range' in result:
+      lsp_range = result[ 'range' ]
+      placeholder = result.get( 'placeholder' )
+    else:
+      lsp_range = result
+
+    if ( not isinstance( lsp_range, dict ) or
+         'start' not in lsp_range or
+         'end' not in lsp_range ):
+      raise RuntimeError( 'Cannot rename the symbol under cursor.' )
+
+    filepath: str = request_data[ 'filepath' ]
+    file_contents: list[ str ] = GetFileLines( request_data, filepath )
+    prepared_range: responses.Range = _BuildRange(
+      file_contents,
+      filepath,
+      lsp_range
+    )
+
+    if placeholder is None:
+      placeholder = _TextForRange( file_contents, prepared_range )
+    elif not isinstance( placeholder, str ):
+      raise RuntimeError( 'Cannot rename the symbol under cursor.' )
+
+    return {
+      'range': responses.BuildRangeData( prepared_range ),
+      'placeholder': placeholder,
+    }
+
+
   def RefactorRename(
       self,
       request_data: RequestWrap,
@@ -3359,33 +3435,12 @@ class LanguageServerCompleter( Completer ):
       raise ValueError( 'Please specify a new name to rename it to.\n'
                         'Usage: RefactorRename <new name>' )
 
-    self._UpdateServerWithFileContents( request_data )
+    if request_data.get( 'prepared_rename' ) is not True:
+      self.PrepareRename( request_data )
+    else:
+      self._UpdateServerWithFileContents( request_data )
 
     connection: LanguageServerConnection = self.GetConnection()
-    rename_provider: object = (
-      self._server_capabilities.get( 'renameProvider' )
-      if self._server_capabilities else None
-    )
-
-    if ( isinstance( rename_provider, dict ) and
-         rename_provider.get( 'prepareProvider' ) ):
-      prepare_request_id: int = connection.NextRequestId()
-      try:
-        prepare_response: dict[ str, object ] = connection.GetResponse(
-          prepare_request_id,
-          lsp.PrepareRename(
-            prepare_request_id,
-            request_data
-          ),
-          REQUEST_TIMEOUT_COMMAND,
-          cancellation_context = request_data.cancellation_context
-        )
-      except ResponseFailedException as exception:
-        raise RuntimeError( exception.error_message ) from exception
-
-      if prepare_response.get( 'result' ) is None:
-        raise RuntimeError( 'Cannot rename the symbol under cursor.' )
-
     new_name: str = args[ 0 ]
     request_id: int = connection.NextRequestId()
     try:
@@ -4009,6 +4064,38 @@ def _BuildRange( contents, filename, r ):
                           _BuildLocationAndDescription( filename,
                                                         contents,
                                                         r[ 'end' ] )[ 0 ] )
+
+
+def _TextForRange(
+    contents: list[ str ],
+    source_range: responses.Range
+) -> str:
+  start_line: int = source_range.start_.line_number_ - 1
+  end_line: int = source_range.end_.line_number_ - 1
+
+  try:
+    start_line_value: str = contents[ start_line ]
+    end_line_value: str = contents[ end_line ]
+  except IndexError:
+    return ''
+
+  start_column: int = utils.ByteOffsetToCodepointOffset(
+    start_line_value,
+    source_range.start_.column_number_
+  ) - 1
+  end_column: int = utils.ByteOffsetToCodepointOffset(
+    end_line_value,
+    source_range.end_.column_number_
+  ) - 1
+
+  if start_line == end_line:
+    return start_line_value[ start_column:end_column ]
+
+  return '\n'.join( [
+    start_line_value[ start_column: ],
+    *contents[ start_line + 1:end_line ],
+    end_line_value[ :end_column ],
+  ] )
 
 
 def _BuildDiagnostic( contents, uri, diag ):

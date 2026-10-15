@@ -53,6 +53,22 @@ class RecordingCancellationCompleter( DummyCompleter ):
     return []
 
 
+  def PrepareRename(
+      self,
+      request_data: RequestWrap
+  ) -> dict[ str, object ]:
+    cancellation_context = request_data.cancellation_context
+    if cancellation_context is not None:
+      self.operation_id = cancellation_context.operation_id
+      self.cancellation_requested = (
+        cancellation_context.IsCancellationRequested()
+      )
+
+    return {
+      'default_behavior': True,
+    }
+
+
 class MiscHandlersTest( TestCase ):
   @IsolatedYcmd()
   def test_MiscHandlers_CancellationBeforeOperationStart(
@@ -84,6 +100,37 @@ class MiscHandlersTest( TestCase ):
 
     assert_that( completer.operation_id, equal_to( 7 ) )
     assert_that( completer.cancellation_requested, equal_to( True ) )
+
+
+  @IsolatedYcmd()
+  def test_MiscHandlers_PrepareRenameIsCancellable(
+      self,
+      app: object
+  ) -> None:
+    with PatchCompleter(
+        RecordingCancellationCompleter,
+        filetype = 'cancellable'
+    ):
+      completer = handlers._server_state.GetFiletypeCompleter(
+        [ 'cancellable' ]
+      )
+
+      response: dict[ str, object ] = app.post_json(
+        '/prepare_rename',
+        BuildRequest(
+          filetype = 'cancellable',
+          operation_id = 8
+        )
+      ).json
+
+    assert_that(
+      response,
+      equal_to( {
+        'default_behavior': True,
+      } )
+    )
+    assert_that( completer.operation_id, equal_to( 8 ) )
+    assert_that( completer.cancellation_requested, equal_to( False ) )
 
 
   @IsolatedYcmd()
